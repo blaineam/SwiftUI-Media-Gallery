@@ -546,7 +546,7 @@ struct ZoomableMediaView: View {
 
     @State private var image: PlatformImage?
     @State private var videoURL: URL?
-    @State private var isLoading = true
+    @State private var isLoading = false  // Start false, only true when actively loading
     @State private var isLoadingMedia = false  // Flag to prevent concurrent loading
     @State private var scale: CGFloat = 1.0
     @State private var lastScale: CGFloat = 1.0
@@ -642,6 +642,7 @@ struct ZoomableMediaView: View {
             return
         }
 
+        // Only set loading flags after passing all guards
         isLoadingMedia = true
         isLoading = true
         defer {
@@ -725,9 +726,9 @@ struct ZoomableMediaView: View {
     }
 
     private func handleDoubleTap(in geometry: GeometryProxy) {
-        // Debounce rapid taps (ignore if less than 0.3 seconds since last tap)
+        // Debounce rapid taps (ignore if less than 0.15 seconds since last tap)
         let now = Date()
-        if now.timeIntervalSince(lastDoubleTapTime) < 0.3 {
+        if now.timeIntervalSince(lastDoubleTapTime) < 0.15 {
             print("🚫 Ignoring rapid double tap")
             return
         }
@@ -735,7 +736,7 @@ struct ZoomableMediaView: View {
 
         print("👆 Double tap - current scale: \(scale), minScale: \(minScale)")
 
-        withAnimation(.spring()) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
             // Use a threshold to detect if we're zoomed in (account for floating point precision)
             if scale > minScale + 0.01 {
                 // Zoom out
@@ -743,12 +744,10 @@ struct ZoomableMediaView: View {
                 scale = minScale
                 offset = .zero
                 lastOffset = .zero
-                lastScale = minScale
             } else {
                 // Zoom in
                 print("🔍 Zooming in to 2.0")
                 scale = 2.0
-                lastScale = 2.0
             }
         }
     }
