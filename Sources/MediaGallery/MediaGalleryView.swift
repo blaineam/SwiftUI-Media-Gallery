@@ -113,12 +113,18 @@ public struct MediaGalleryView: View {
                     .opacity(currentIndex == index ? 1 : 0)
                     .zIndex(currentIndex == index ? 1 : 0)
                     .allowsHitTesting(currentIndex == index)
-                    .highPriorityGesture(
-                        // High priority swipe gesture for navigation when not zoomed
-                        // Only responds when not zoomed - doesn't recreate view when zoom state changes
+                    .simultaneousGesture(
+                        // Navigation gesture that only activates when NOT zoomed
+                        // Uses simultaneousGesture so it doesn't block child pan when zoomed
                         DragGesture(minimumDistance: 50)
+                            .onChanged { value in
+                                // Track if this is a valid navigation swipe
+                                if !isZoomed && abs(value.translation.width) > abs(value.translation.height) {
+                                    // Horizontal swipe while not zoomed - this will navigate
+                                }
+                            }
                             .onEnded { value in
-                                // Only navigate if not zoomed
+                                // Only navigate if not zoomed and horizontal swipe
                                 guard !isZoomed else { return }
                                 if abs(value.translation.width) > abs(value.translation.height) {
                                     if value.translation.width < 0 {

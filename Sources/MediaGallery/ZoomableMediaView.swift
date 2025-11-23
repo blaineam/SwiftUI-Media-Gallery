@@ -697,10 +697,16 @@ struct ZoomableMediaView: View {
             .onEnded { _ in
                 lastScale = 1.0
                 if scale < minScale {
-                    withAnimation(.spring()) {
+                    withAnimation(.easeOut(duration: 0.3)) {
                         scale = minScale
                         offset = .zero
                         lastOffset = .zero
+                    }
+                } else {
+                    // Smoothly slide back to constrained bounds
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        offset = constrainOffset(offset, in: geometry)
+                        lastOffset = offset
                     }
                 }
             }
@@ -712,6 +718,7 @@ struct ZoomableMediaView: View {
                 // Only pan if zoomed in
                 // When not zoomed, this does nothing, allowing parent swipe gesture to work
                 if scale > minScale {
+                    // Allow dragging freely without constraints
                     offset = CGSize(
                         width: lastOffset.width + value.translation.width,
                         height: lastOffset.height + value.translation.height
@@ -720,11 +727,35 @@ struct ZoomableMediaView: View {
             }
             .onEnded { _ in
                 if scale > minScale {
-                    lastOffset = offset
+                    // Smoothly slide back to constrained bounds when drag ends
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        offset = constrainOffset(offset, in: geometry)
+                        lastOffset = offset
+                    }
                 }
             }
 
         return magnification.simultaneously(with: drag)
+    }
+
+    private func constrainOffset(_ offset: CGSize, in geometry: GeometryProxy) -> CGSize {
+        guard scale > minScale else { return .zero }
+
+        // Calculate the size of the scaled image
+        let imageWidth = geometry.size.width * scale
+        let imageHeight = geometry.size.height * scale
+
+        // Calculate maximum allowed offset
+        // When zoomed, the image is larger than the viewport, so we can pan
+        // But we want to prevent it from being dragged completely off screen
+        let maxOffsetX = max(0, (imageWidth - geometry.size.width) / 2)
+        let maxOffsetY = max(0, (imageHeight - geometry.size.height) / 2)
+
+        // Constrain the offset to keep the image edges visible
+        let constrainedX = min(max(offset.width, -maxOffsetX), maxOffsetX)
+        let constrainedY = min(max(offset.height, -maxOffsetY), maxOffsetY)
+
+        return CGSize(width: constrainedX, height: constrainedY)
     }
 
     private func handleDoubleTap(in geometry: GeometryProxy) {
@@ -742,6 +773,9 @@ struct ZoomableMediaView: View {
                 // Zoom in
                 print("🔍 Zooming in to 2.0")
                 scale = 2.0
+                // Constrain offset after zooming in
+                offset = constrainOffset(offset, in: geometry)
+                lastOffset = offset
             }
         }
     }
