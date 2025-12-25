@@ -79,6 +79,11 @@ struct CustomVideoPlayerView: View {
     @State private var showVideoControls = true
     @State private var timeObserver: Any?
     @State private var endTimeObserver: NSObjectProtocol?
+    @State private var showVolumeSlider = false
+
+    // Persist volume preference across media items
+    @AppStorage("MediaStream_VideoVolume") private var volume: Double = 1.0
+    @AppStorage("MediaStream_VideoMuted") private var isMuted: Bool = false
 
     var body: some View {
         ZStack {
@@ -127,12 +132,66 @@ struct CustomVideoPlayerView: View {
                             .font(.caption)
                             .foregroundColor(.white)
                             .monospacedDigit()
+
+                        // Volume controls
+                        HStack(spacing: 8) {
+                            // Volume slider (expandable)
+                            if showVolumeSlider {
+                                Slider(value: $volume, in: 0...1) { editing in
+                                    if !editing {
+                                        applyVolume()
+                                    }
+                                }
+                                .frame(width: 80)
+                                .tint(.white)
+                                .onChange(of: volume) { _, newValue in
+                                    player.volume = Float(newValue)
+                                    if newValue > 0 && isMuted {
+                                        isMuted = false
+                                        player.isMuted = false
+                                    }
+                                }
+                            }
+
+                            // Volume/mute button
+                            Button(action: {
+                                if showVolumeSlider {
+                                    toggleMute()
+                                } else {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        showVolumeSlider = true
+                                    }
+                                }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(.ultraThinMaterial)
+                                        .frame(width: 36, height: 36)
+
+                                    Image(systemName: volumeIcon)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.white)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .onLongPressGesture(minimumDuration: 0.3) {
+                                toggleMute()
+                            }
+                        }
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .padding(.horizontal, 20)
                     .padding(.bottom, 20)
+                    .onTapGesture {
+                        // Collapse volume slider when tapping elsewhere on controls
+                        if showVolumeSlider {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showVolumeSlider = false
+                            }
+                        }
+                    }
                 }
                 .transition(.opacity)
             }
@@ -224,6 +283,20 @@ struct CustomVideoPlayerView: View {
     private func setupPlayer() {
         // Clean up any existing observers first to prevent duplicates
         cleanupPlayer()
+
+        // Configure audio session for playback (iOS only)
+        #if canImport(UIKit) && !os(macOS)
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("⚠️ Failed to configure audio session: \(error)")
+        }
+        #endif
+
+        // Apply persisted volume settings
+        player.isMuted = isMuted
+        player.volume = Float(volume)
 
         // Get duration if we don't have it
         if let currentItem = player.currentItem {
@@ -383,6 +456,32 @@ struct CustomVideoPlayerView: View {
             wasAtEnd = false
         }
         isPlaying.toggle()
+    }
+
+    private var volumeIcon: String {
+        if isMuted || volume == 0 {
+            return "speaker.slash.fill"
+        } else if volume > 0.66 {
+            return "speaker.wave.3.fill"
+        } else if volume > 0.33 {
+            return "speaker.wave.2.fill"
+        } else {
+            return "speaker.wave.1.fill"
+        }
+    }
+
+    private func toggleMute() {
+        isMuted.toggle()
+        player.isMuted = isMuted
+        if !isMuted && volume == 0 {
+            volume = 0.5
+            player.volume = 0.5
+        }
+    }
+
+    private func applyVolume() {
+        player.volume = Float(volume)
+        player.isMuted = isMuted
     }
 
     private func seekTo(_ time: Double) {
