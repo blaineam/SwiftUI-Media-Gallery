@@ -1,4 +1,4 @@
-# SwiftUI Media Gallery
+# MediaStream
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-iOS%2017.0%2B%20%7C%20macOS%2014.0%2B-blue" alt="Platform">
@@ -61,7 +61,7 @@ Add the package to your Xcode project:
 1. In Xcode, go to **File > Add Package Dependencies**
 2. Enter the repository URL:
    ```
-   https://github.com/blaineam/SwiftUI-Media-Gallery.git
+   https://github.com/blaineam/MediaStream.git
    ```
 3. Select your desired version or branch
 4. Click **Add Package**
@@ -70,7 +70,7 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/blaineam/SwiftUI-Media-Gallery.git", from: "1.0.0")
+    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.0.0")
 ]
 ```
 
@@ -80,7 +80,7 @@ dependencies: [
 
 ```swift
 import SwiftUI
-import MediaGallery
+import MediaStream
 
 struct ContentView: View {
     let mediaItems: [any MediaItem] = [
@@ -110,7 +110,7 @@ struct ContentView: View {
 
 ```swift
 import SwiftUI
-import MediaGallery
+import MediaStream
 
 struct GalleryBrowserView: View {
     let mediaItems: [any MediaItem]
@@ -149,7 +149,7 @@ The `MediaItem` protocol is the foundation of the package. Here's a complete imp
 
 ```swift
 import Foundation
-import MediaGallery
+import MediaStream
 
 #if canImport(UIKit)
 import UIKit
@@ -475,7 +475,7 @@ func loadImage() async -> PlatformImage? {
 The package is designed with a protocol-oriented architecture:
 
 ```
-MediaGallery (Package)
+MediaStream (Package)
 ├── MediaItem (Protocol)
 │   ├── Defines interface for media items
 │   └── Async methods for loading content
@@ -612,7 +612,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 Blaine Miller - [@blaineam](https://github.com/blaineam)
 
-Project Link: [https://github.com/blaineam/SwiftUI-Media-Gallery](https://github.com/blaineam/SwiftUI-Media-Gallery)
+Project Link: [https://github.com/blaineam/MediaStream](https://github.com/blaineam/MediaStream)
 
 ---
 
