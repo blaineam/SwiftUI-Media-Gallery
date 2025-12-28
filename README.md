@@ -52,6 +52,13 @@ A comprehensive SwiftUI package for displaying beautiful media galleries with ad
 - Drag & drop support (macOS)
 - Cross-platform support (iOS & macOS)
 
+### 🧠 Memory Optimization (v1.1.0)
+- **LRU Thumbnail Cache**: Automatic eviction of least-recently-used thumbnails with configurable memory limit (default 100MB)
+- **Visibility-based Loading**: Only loads thumbnails for items currently visible on screen
+- **ImageIO Downsampling**: Uses efficient CGImageSource for thumbnails without loading full images into memory
+- **Memory Pressure Handling**: Automatically evicts cache entries when iOS sends memory warnings
+- **Lazy Gallery Rendering**: Only renders current and adjacent items in slideshow view (not all 600+ items)
+
 ## 📦 Installation
 
 ### Swift Package Manager
@@ -70,7 +77,7 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.0.0")
+    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.1.0")
 ]
 ```
 
@@ -478,15 +485,22 @@ The package is designed with a protocol-oriented architecture:
 MediaStream (Package)
 ├── MediaItem (Protocol)
 │   ├── Defines interface for media items
-│   └── Async methods for loading content
+│   ├── Async methods for loading content
+│   └── loadThumbnail for efficient thumbnail loading (v1.1.0)
 ├── MediaGalleryView
 │   ├── Main slideshow view
 │   ├── Zoom & pan support
-│   └── Slideshow controls
+│   ├── Slideshow controls
+│   └── Lazy rendering (only current + adjacent items)
 ├── MediaGalleryGridView
 │   ├── Grid browsing interface
 │   ├── Multi-select mode
-│   └── Filtering UI
+│   ├── Filtering UI
+│   └── LazyThumbnailView for visibility-based loading (v1.1.0)
+├── ThumbnailCache (v1.1.0)
+│   ├── LRU cache with memory limit
+│   ├── Memory pressure handling
+│   └── ImageIO-based downsampling
 ├── ZoomableMediaView
 │   ├── Individual media display
 │   ├── Gesture handling
@@ -509,12 +523,36 @@ public protocol MediaItem: Identifiable, Sendable {
     var type: MediaType { get }
 
     func loadImage() async -> PlatformImage?
+    func loadThumbnail(targetSize: CGFloat) async -> PlatformImage?  // v1.1.0
     func loadVideoURL() async -> URL?
     func getAnimatedImageDuration() async -> TimeInterval?
     func getVideoDuration() async -> TimeInterval?
     func getShareableItem() async -> Any?
     func getCaption() async -> String?
     func hasAudioTrack() async -> Bool
+}
+```
+
+### ThumbnailCache (v1.1.0)
+
+```swift
+public final class ThumbnailCache {
+    public static let shared: ThumbnailCache
+    public static let thumbnailSize: CGFloat = 200
+
+    public init(maxMemoryMB: Int = 100)
+
+    public func get(_ id: UUID) -> PlatformImage?
+    public func set(_ id: UUID, image: PlatformImage)
+    public func contains(_ id: UUID) -> Bool
+    public func clear()
+    public func handleMemoryPressure()
+    public var stats: (count: Int, memoryMB: Double)
+
+    // Efficient thumbnail generation using ImageIO
+    public static func createThumbnail(from image: PlatformImage, targetSize: CGFloat) -> PlatformImage
+    public static func createThumbnail(from data: Data, targetSize: CGFloat) -> PlatformImage?
+    public static func createThumbnail(from url: URL, targetSize: CGFloat) -> PlatformImage?
 }
 ```
 

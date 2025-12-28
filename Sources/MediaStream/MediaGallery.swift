@@ -9,9 +9,12 @@
 // - Automatic video playback in slideshow
 // - Pause slideshow when zoomed
 // - Cross-platform support (iOS & macOS)
+// - Memory-optimized thumbnail caching with LRU eviction
+// - Visibility-based lazy loading for large galleries
+// - Memory pressure handling for iOS
 
 import Foundation
 
 public struct MediaGallery {
-    public static let version = "1.0.0"
+    public static let version = "1.1.0"
 }

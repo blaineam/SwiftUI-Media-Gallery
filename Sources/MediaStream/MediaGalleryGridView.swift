@@ -70,7 +70,6 @@ public struct MediaGalleryGridView: View {
 
     @State private var selectedFilter: MediaFilter = .all
     @State private var filteredItems: [any MediaItem] = []
-    @State private var thumbnails: [UUID: PlatformImage] = [:]
     @State private var videoDurations: [UUID: TimeInterval] = [:]
     @State private var videoHasAudio: [UUID: Bool] = [:]
     @State private var isMultiSelectMode = false
@@ -79,6 +78,11 @@ public struct MediaGalleryGridView: View {
     @State private var shareItems: [Any] = []
     @State private var contextMenuShareItem: Any?
     @State private var hasMultipleMediaTypes = false
+    @State private var visibleItemIds: Set<UUID> = []
+    @State private var loadingItemIds: Set<UUID> = []
+
+    /// Number of items to preload around visible area
+    private let preloadBuffer = 6
 
     public init(
         mediaItems: [any MediaItem],
@@ -115,13 +119,18 @@ public struct MediaGalleryGridView: View {
                 ScrollView {
                     LazyVGrid(columns: gridColumns, spacing: 16) {
                         ForEach(Array(filteredItems.enumerated()), id: \.element.id) { index, item in
-                            MediaThumbnailView(
+                            LazyThumbnailView(
                                 mediaItem: item,
-                                thumbnail: thumbnails[item.id],
                                 videoDuration: videoDurations[item.id],
                                 videoHasAudio: videoHasAudio[item.id],
                                 isSelected: selectedItems.contains(item.id),
-                                showSelection: isMultiSelectMode
+                                showSelection: isMultiSelectMode,
+                                onVisible: { itemId in
+                                    handleItemVisible(itemId: itemId, index: index)
+                                },
+                                onHidden: { itemId in
+                                    handleItemHidden(itemId: itemId)
+                                }
                             )
                             .id(item.id)
                             .onTapGesture {
@@ -264,7 +273,12 @@ public struct MediaGalleryGridView: View {
         .onAppear {
             checkMediaTypes()
             applyFilters()
-            loadThumbnails()
+            // Thumbnails are now loaded lazily as items become visible
+        }
+        .onDisappear {
+            // Clear visible items tracking when view disappears
+            visibleItemIds.removeAll()
+            loadingItemIds.removeAll()
         }
         .onChange(of: selectedFilter) { _, _ in
             applyFilters()
@@ -570,29 +584,31 @@ public struct MediaGalleryGridView: View {
         hasMultipleMediaTypes = false
     }
 
-    private func loadThumbnails() {
-        Task {
-            for item in mediaItems {
-                if let image = await item.loadImage() {
-                    await MainActor.run {
-                        thumbnails[item.id] = image
-                    }
-                }
+    /// Handle an item becoming visible in the viewport
+    private func handleItemVisible(itemId: UUID, index: Int) {
+        visibleItemIds.insert(itemId)
 
-                if item.type == .video {
+        // Load video metadata if not cached
+        if let item = mediaItems.first(where: { $0.id == itemId }), item.type == .video {
+            if videoDurations[itemId] == nil {
+                Task {
                     if let duration = await item.getVideoDuration() {
                         await MainActor.run {
-                            videoDurations[item.id] = duration
+                            videoDurations[itemId] = duration
                         }
                     }
-
                     let hasAudio = await item.hasAudioTrack()
                     await MainActor.run {
-                        videoHasAudio[item.id] = hasAudio
+                        videoHasAudio[itemId] = hasAudio
                     }
                 }
             }
         }
+    }
+
+    /// Handle an item becoming hidden (scrolled out of view)
+    private func handleItemHidden(itemId: UUID) {
+        visibleItemIds.remove(itemId)
     }
 
     private func scrollToInitialIndex(proxy: ScrollViewProxy) {
@@ -639,13 +655,19 @@ struct FilterChip: View {
     }
 }
 
-struct MediaThumbnailView: View {
+/// Lazy-loading thumbnail view that only loads images when visible
+struct LazyThumbnailView: View {
     let mediaItem: any MediaItem
-    let thumbnail: PlatformImage?
     let videoDuration: TimeInterval?
     var videoHasAudio: Bool? = nil
     var isSelected: Bool = false
     var showSelection: Bool = false
+    var onVisible: ((UUID) -> Void)? = nil
+    var onHidden: ((UUID) -> Void)? = nil
+
+    @State private var thumbnail: PlatformImage?
+    @State private var isLoading = false
+    @State private var hasAppeared = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -662,9 +684,11 @@ struct MediaThumbnailView: View {
                             .resizable()
                             .scaledToFill()
                         #endif
-                    } else {
+                    } else if isLoading {
                         Color.gray.opacity(0.3)
                         ProgressView()
+                    } else {
+                        Color.gray.opacity(0.3)
                     }
                 }
                 .frame(width: geometry.size.width, height: geometry.size.width)
@@ -738,12 +762,70 @@ struct MediaThumbnailView: View {
             }
         }
         .aspectRatio(1, contentMode: .fit)
+        .onAppear {
+            guard !hasAppeared else { return }
+            hasAppeared = true
+            onVisible?(mediaItem.id)
+            loadThumbnailIfNeeded()
+        }
+        .onDisappear {
+            onHidden?(mediaItem.id)
+        }
+    }
+
+    private func loadThumbnailIfNeeded() {
+        // Check cache first
+        if let cached = ThumbnailCache.shared.get(mediaItem.id) {
+            self.thumbnail = cached
+            return
+        }
+
+        guard !isLoading else { return }
+        isLoading = true
+
+        Task {
+            // Use the optimized loadThumbnail method which can use ImageIO
+            // for efficient downsampling without loading full image into memory
+            if let thumb = await mediaItem.loadThumbnail(targetSize: ThumbnailCache.thumbnailSize) {
+                // Cache it
+                ThumbnailCache.shared.set(mediaItem.id, image: thumb)
+
+                await MainActor.run {
+                    self.thumbnail = thumb
+                    self.isLoading = false
+                }
+            } else {
+                await MainActor.run {
+                    self.isLoading = false
+                }
+            }
+        }
     }
 
     private func formatDuration(_ duration: TimeInterval) -> String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+/// Legacy thumbnail view for backwards compatibility
+struct MediaThumbnailView: View {
+    let mediaItem: any MediaItem
+    let thumbnail: PlatformImage?
+    let videoDuration: TimeInterval?
+    var videoHasAudio: Bool? = nil
+    var isSelected: Bool = false
+    var showSelection: Bool = false
+
+    var body: some View {
+        LazyThumbnailView(
+            mediaItem: mediaItem,
+            videoDuration: videoDuration,
+            videoHasAudio: videoHasAudio,
+            isSelected: isSelected,
+            showSelection: showSelection
+        )
     }
 }
 

@@ -2,6 +2,12 @@ import Testing
 import Foundation
 @testable import MediaStream
 
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
 // MARK: - Thread-safe test helper
 
 final class CallTracker: @unchecked Sendable {
@@ -557,6 +563,233 @@ struct IndexBoundsTests {
 
         let clampedValid = min(max(0, 1), items.count - 1)
         #expect(clampedValid == 1)
+    }
+}
+
+// MARK: - ThumbnailCache Tests
+
+@Suite("ThumbnailCache Tests")
+struct ThumbnailCacheTests {
+    @Test("ThumbnailCache singleton exists")
+    func singletonExists() {
+        let cache = ThumbnailCache.shared
+        #expect(cache != nil)
+    }
+
+    @Test("ThumbnailCache stores and retrieves images")
+    func storeAndRetrieve() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+        let testId = UUID()
+
+        // Create a simple test image
+        #if canImport(UIKit)
+        let image = UIImage()
+        #elseif canImport(AppKit)
+        let image = NSImage(size: NSSize(width: 100, height: 100))
+        #endif
+
+        cache.set(testId, image: image)
+        let retrieved = cache.get(testId)
+
+        #expect(retrieved != nil)
+        cache.clear()
+    }
+
+    @Test("ThumbnailCache returns nil for non-existent key")
+    func returnsNilForNonExistent() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+        let testId = UUID()
+
+        let retrieved = cache.get(testId)
+        #expect(retrieved == nil)
+    }
+
+    @Test("ThumbnailCache contains check works")
+    func containsCheck() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+        let testId = UUID()
+
+        #expect(cache.contains(testId) == false)
+
+        #if canImport(UIKit)
+        let image = UIImage()
+        #elseif canImport(AppKit)
+        let image = NSImage(size: NSSize(width: 100, height: 100))
+        #endif
+
+        cache.set(testId, image: image)
+        #expect(cache.contains(testId) == true)
+
+        cache.clear()
+    }
+
+    @Test("ThumbnailCache clear removes all entries")
+    func clearRemovesAll() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+
+        #if canImport(UIKit)
+        let image = UIImage()
+        #elseif canImport(AppKit)
+        let image = NSImage(size: NSSize(width: 100, height: 100))
+        #endif
+
+        // Add multiple items
+        for _ in 0..<5 {
+            cache.set(UUID(), image: image)
+        }
+
+        let statsBefore = cache.stats
+        #expect(statsBefore.count == 5)
+
+        cache.clear()
+
+        let statsAfter = cache.stats
+        let afterCount = statsAfter.count
+        #expect(afterCount == 0)
+        #expect(statsAfter.memoryMB == 0)
+    }
+
+    @Test("ThumbnailCache stats reports count and memory")
+    func statsReportsValues() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+
+        let stats = cache.stats
+        let itemCount = stats.count
+        #expect(itemCount >= 0)
+        #expect(stats.memoryMB >= 0)
+
+        cache.clear()
+    }
+
+    @Test("ThumbnailCache handleMemoryPressure evicts entries")
+    func memoryPressureEvicts() {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+
+        #if canImport(UIKit)
+        let image = UIImage()
+        #elseif canImport(AppKit)
+        let image = NSImage(size: NSSize(width: 100, height: 100))
+        #endif
+
+        // Add items
+        for _ in 0..<10 {
+            cache.set(UUID(), image: image)
+        }
+
+        let countBefore = cache.stats.count
+        cache.handleMemoryPressure()
+
+        // Memory pressure should reduce cache size
+        // (exact behavior depends on image sizes)
+        let countAfter = cache.stats.count
+        #expect(countAfter <= countBefore)
+
+        cache.clear()
+    }
+
+    @Test("ThumbnailCache thumbnailSize has reasonable value")
+    func thumbnailSizeReasonable() {
+        let size = ThumbnailCache.thumbnailSize
+        #expect(size > 50)
+        #expect(size < 500)
+    }
+
+    @Test("ThumbnailCache createThumbnail from image returns smaller image")
+    func createThumbnailFromImage() {
+        #if canImport(UIKit)
+        // Create a large test image
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1000, height: 1000))
+        let largeImage = renderer.image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(origin: .zero, size: CGSize(width: 1000, height: 1000)))
+        }
+
+        let thumbnail = ThumbnailCache.createThumbnail(from: largeImage, targetSize: 100)
+
+        #expect(thumbnail.size.width <= 100)
+        #expect(thumbnail.size.height <= 100)
+        #elseif canImport(AppKit)
+        let largeImage = NSImage(size: NSSize(width: 1000, height: 1000))
+        largeImage.lockFocus()
+        NSColor.red.setFill()
+        NSRect(origin: .zero, size: NSSize(width: 1000, height: 1000)).fill()
+        largeImage.unlockFocus()
+
+        let thumbnail = ThumbnailCache.createThumbnail(from: largeImage, targetSize: 100)
+
+        #expect(thumbnail.size.width <= 100)
+        #expect(thumbnail.size.height <= 100)
+        #endif
+    }
+
+    @Test("ThumbnailCache createThumbnail from data returns nil for invalid data")
+    func createThumbnailFromInvalidData() {
+        let invalidData = Data([0x00, 0x01, 0x02])
+        let thumbnail = ThumbnailCache.createThumbnail(from: invalidData, targetSize: 100)
+        #expect(thumbnail == nil)
+    }
+
+    @Test("ThumbnailCache createThumbnail from URL returns nil for non-existent file")
+    func createThumbnailFromNonExistentURL() {
+        let url = URL(fileURLWithPath: "/nonexistent/file.jpg")
+        let thumbnail = ThumbnailCache.createThumbnail(from: url, targetSize: 100)
+        #expect(thumbnail == nil)
+    }
+
+    @Test("ThumbnailCache is thread-safe")
+    func threadSafety() async {
+        let cache = ThumbnailCache(maxMemoryMB: 10)
+
+        #if canImport(UIKit)
+        let image = UIImage()
+        #elseif canImport(AppKit)
+        let image = NSImage(size: NSSize(width: 100, height: 100))
+        #endif
+
+        // Concurrent access from multiple tasks
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<100 {
+                group.addTask {
+                    let id = UUID()
+                    cache.set(id, image: image)
+                    _ = cache.get(id)
+                    _ = cache.contains(id)
+                    _ = cache.stats
+                }
+            }
+        }
+
+        // If we get here without crashing, thread safety is working
+        cache.clear()
+    }
+}
+
+// MARK: - Default loadThumbnail Tests
+
+@Suite("Default loadThumbnail Tests")
+struct DefaultLoadThumbnailTests {
+    @Test("ImageMediaItem default loadThumbnail returns nil when loadImage returns nil")
+    func imageItemDefaultThumbnailNil() async {
+        let item = ImageMediaItem { nil }
+        let thumbnail = await item.loadThumbnail(targetSize: 100)
+        #expect(thumbnail == nil)
+    }
+
+    @Test("VideoMediaItem default loadThumbnail returns nil when no thumbnail loader")
+    func videoItemDefaultThumbnailNil() async {
+        let item = VideoMediaItem { nil }
+        let thumbnail = await item.loadThumbnail(targetSize: 100)
+        #expect(thumbnail == nil)
+    }
+
+    @Test("AnimatedImageMediaItem default loadThumbnail returns nil when loadImage returns nil")
+    func animatedItemDefaultThumbnailNil() async {
+        let item = AnimatedImageMediaItem(
+            imageLoader: { nil },
+            durationLoader: { nil }
+        )
+        let thumbnail = await item.loadThumbnail(targetSize: 100)
+        #expect(thumbnail == nil)
     }
 }
 

@@ -76,6 +76,39 @@ public struct MediaGalleryView: View {
     @State private var isFullscreen = false
     @FocusState private var isFocused: Bool
 
+    /// Number of adjacent items to preload on each side
+    private let preloadCount = 1
+
+    /// Returns indices for current item plus adjacent items for preloading
+    /// This limits memory usage by only rendering ~3 items instead of all 600+
+    private var visibleIndices: [Int] {
+        guard !mediaItems.isEmpty else { return [] }
+
+        var indices: [Int] = []
+        let count = mediaItems.count
+
+        // Add previous items (with wrapping)
+        for offset in (1...preloadCount).reversed() {
+            let idx = (currentIndex - offset + count) % count
+            if !indices.contains(idx) {
+                indices.append(idx)
+            }
+        }
+
+        // Add current
+        indices.append(currentIndex)
+
+        // Add next items (with wrapping)
+        for offset in 1...preloadCount {
+            let idx = (currentIndex + offset) % count
+            if !indices.contains(idx) {
+                indices.append(idx)
+            }
+        }
+
+        return indices
+    }
+
     public init(
         mediaItems: [any MediaItem],
         initialIndex: Int = 0,
@@ -98,8 +131,11 @@ public struct MediaGalleryView: View {
             configuration.backgroundColor
                 .ignoresSafeArea()
 
+            // Only render current and adjacent items to save memory
+            // For 600+ items, rendering all would cause OOM
             ZStack {
-                ForEach(Array(mediaItems.enumerated()), id: \.element.id) { index, item in
+                ForEach(visibleIndices, id: \.self) { index in
+                    let item = mediaItems[index]
                     ZoomableMediaView(
                         mediaItem: item,
                         onZoomChanged: { zoomed in

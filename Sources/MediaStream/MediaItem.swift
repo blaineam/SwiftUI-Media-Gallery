@@ -23,6 +23,10 @@ public protocol MediaItem: Identifiable, Sendable {
     /// Load the image content asynchronously
     func loadImage() async -> PlatformImage?
 
+    /// Load a downsampled thumbnail efficiently (memory-optimized)
+    /// Default implementation calls loadImage() and downsamples
+    func loadThumbnail(targetSize: CGFloat) async -> PlatformImage?
+
     /// Load the video URL (for video type only)
     func loadVideoURL() async -> URL?
 
@@ -40,6 +44,17 @@ public protocol MediaItem: Identifiable, Sendable {
 
     /// Check if video has audio track (for video type only)
     func hasAudioTrack() async -> Bool
+}
+
+// MARK: - Default Implementation for loadThumbnail
+
+extension MediaItem {
+    /// Default implementation: loads full image and downsamples
+    /// Subclasses can override for more efficient file-based loading
+    public func loadThumbnail(targetSize: CGFloat = ThumbnailCache.thumbnailSize) async -> PlatformImage? {
+        guard let fullImage = await loadImage() else { return nil }
+        return ThumbnailCache.createThumbnail(from: fullImage, targetSize: targetSize)
+    }
 }
 
 /// Platform-agnostic image type
