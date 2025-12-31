@@ -1447,25 +1447,6 @@ public struct CustomWebViewVideoPlayerView: View {
             WebViewVideoRepresentable(controller: controller)
                 .allowsHitTesting(controller.needsUserGestureForAudio)
 
-            // Audio gesture overlay - shown when user needs to tap to enable audio
-            if controller.needsUserGestureForAudio {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Image(systemName: "speaker.slash.fill")
-                            .foregroundColor(.white)
-                        Text("Tap video to enable audio")
-                            .font(.caption)
-                            .foregroundColor(.white)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.bottom, 60) // Above controls
-                }
-                .allowsHitTesting(false) // Let taps pass through to video
-            }
-
             // Controls overlay
             if showControls {
                 VStack(spacing: 0) {
@@ -1535,7 +1516,9 @@ public struct CustomWebViewVideoPlayerView: View {
 
                         // Volume controls
                         HStack(spacing: 8) {
-                            // Volume slider (expandable)
+                            #if os(macOS)
+                            // Volume slider (expandable) - macOS only
+                            // iOS ignores video.volume (always 1.0, uses device volume buttons)
                             if showVolumeSlider {
                                 Slider(value: $volume, in: 0...1) { editing in
                                     hasUserAudioInteraction = true
@@ -1563,10 +1546,12 @@ public struct CustomWebViewVideoPlayerView: View {
                                     resetVolumeCollapseTimer()
                                 }
                             }
+                            #endif
 
-                            // Volume/mute button
+                            // Mute button (iOS: just mute toggle, macOS: expands to show slider)
                             Button(action: {
                                 hasUserAudioInteraction = true
+                                #if os(macOS)
                                 if showVolumeSlider {
                                     toggleMute()
                                 } else {
@@ -1574,22 +1559,24 @@ public struct CustomWebViewVideoPlayerView: View {
                                         showVolumeSlider = true
                                     }
                                     // Always sync volume and muted state when slider is shown
-                                    // Video starts muted in HTML, so we must explicitly unmute
                                     controller.setVolume(Float(volume))
                                     controller.setMuted(isMuted)
-                                    // If not muted in our state, unmute the video too
                                     if !isMuted {
                                         controller.setMuted(false)
                                     }
                                 }
                                 resetVolumeCollapseTimer()
+                                #else
+                                // iOS: just toggle mute (volume slider doesn't work on iOS WebKit)
+                                toggleMute()
+                                #endif
                             }) {
                                 ZStack {
                                     Circle()
                                         .fill(.ultraThinMaterial)
                                         .frame(width: 36, height: 36)
 
-                                    Image(systemName: volumeIcon)
+                                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                                         .font(.system(size: 14, weight: .semibold))
                                         .foregroundColor(.white)
                                 }
