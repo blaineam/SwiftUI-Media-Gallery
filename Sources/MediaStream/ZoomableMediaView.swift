@@ -893,6 +893,14 @@ struct ZoomableMediaView: View {
                     // When navigating away from this slide, pause the video
                     videoController.pause()
                 }
+            } else if mediaItem.type == .animatedImage && useWebViewForAnimatedImage {
+                if newValue && !oldValue {
+                    // Became current slide - start animation
+                    animatedImageController.startAnimating()
+                } else if !newValue && oldValue {
+                    // Left current slide - stop animation to save memory
+                    animatedImageController.stopAnimating()
+                }
             }
         }
         .onChange(of: isSlideshowPlaying) { oldValue, newValue in
@@ -969,18 +977,45 @@ struct ZoomableMediaView: View {
             #if canImport(UIKit)
             // Use WKWebView for animated images - much more memory efficient
             // Browser handles GIF frame decoding/caching internally
-            if let url = await mediaItem.loadAnimatedImageURL() {
-                print("ZoomableMediaView: Loading animated image via WebView: \(url.lastPathComponent)")
+            // Check sourceURL first (simplest), then loadAnimatedImageURL(), then loadAnimatedImageData()
+            if let url = mediaItem.sourceURL {
+                // Direct URL - just load in WebView, no downloading/decoding needed
+                print("ZoomableMediaView: Loading animated image via WebView (sourceURL): \(url.lastPathComponent)")
                 animatedImageURL = url
                 useWebViewForAnimatedImage = true
                 hasLoadedMedia = true
 
-                // Setup WebView and load
                 await MainActor.run {
                     if animatedImageController.webView == nil {
                         _ = animatedImageController.createWebView()
                     }
                     animatedImageController.load(url: url)
+                    // Start animation if this is the current slide
+                    if isCurrentSlide {
+                        // Small delay to let WebView load
+                        Task {
+                            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+                            animatedImageController.startAnimating()
+                        }
+                    }
+                }
+            } else if let url = await mediaItem.loadAnimatedImageURL() {
+                print("ZoomableMediaView: Loading animated image via WebView: \(url.lastPathComponent)")
+                animatedImageURL = url
+                useWebViewForAnimatedImage = true
+                hasLoadedMedia = true
+
+                await MainActor.run {
+                    if animatedImageController.webView == nil {
+                        _ = animatedImageController.createWebView()
+                    }
+                    animatedImageController.load(url: url)
+                    if isCurrentSlide {
+                        Task {
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            animatedImageController.startAnimating()
+                        }
+                    }
                 }
             } else if let data = await mediaItem.loadAnimatedImageData() {
                 // Save data to temp file for WebView
@@ -998,6 +1033,12 @@ struct ZoomableMediaView: View {
                         _ = animatedImageController.createWebView()
                     }
                     animatedImageController.load(url: tempURL)
+                    if isCurrentSlide {
+                        Task {
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            animatedImageController.startAnimating()
+                        }
+                    }
                 }
             } else {
                 // No URL or Data - fall back to loadImage()
@@ -1015,6 +1056,12 @@ struct ZoomableMediaView: View {
                                     _ = animatedImageController.createWebView()
                                 }
                                 animatedImageController.load(url: tempURL)
+                                if isCurrentSlide {
+                                    Task {
+                                        try? await Task.sleep(nanoseconds: 100_000_000)
+                                        animatedImageController.startAnimating()
+                                    }
+                                }
                             }
                             // UIImage will be released when function exits
                         } else {

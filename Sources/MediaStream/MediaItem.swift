@@ -92,6 +92,11 @@ public protocol MediaItem: Identifiable, Sendable {
     /// Return nil if caching is not desired for this item
     var diskCacheKey: String? { get }
 
+    /// The source URL for this media item (if available)
+    /// For animated images, this is used directly by WebView for memory-efficient display
+    /// Implement this to avoid downloading/decoding large GIFs - just pass the URL to WebView
+    var sourceURL: URL? { get }
+
     /// Load the image content asynchronously
     func loadImage() async -> PlatformImage?
 
@@ -141,6 +146,13 @@ extension MediaItem {
 extension MediaItem {
     /// Default: no disk caching (items must opt in)
     public var diskCacheKey: String? { nil }
+}
+
+// MARK: - Default sourceURL Implementation
+
+extension MediaItem {
+    /// Default: no source URL (will use loadImage instead)
+    public var sourceURL: URL? { nil }
 }
 
 // MARK: - Default Implementation for loadThumbnail

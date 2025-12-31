@@ -119,12 +119,21 @@ public class WebViewAnimatedImageController: NSObject, ObservableObject {
                     max-height: 100%;
                     object-fit: contain;
                 }
+                img.paused {
+                    /* Freeze animation by using a static copy */
+                    animation-play-state: paused;
+                }
             </style>
         </head>
         <body>
-            <img id="animatedImage" src="\(imageURLString)" />
+            <img id="animatedImage" />
             <script>
                 const img = document.getElementById('animatedImage');
+                const originalSrc = '\(imageURLString)';
+                let isAnimating = false;
+
+                // Start with image hidden until we want to animate
+                img.style.visibility = 'hidden';
 
                 img.onload = function() {
                     console.log('Animated image loaded: ' + img.naturalWidth + 'x' + img.naturalHeight);
@@ -132,15 +141,51 @@ public class WebViewAnimatedImageController: NSObject, ObservableObject {
                         width: img.naturalWidth,
                         height: img.naturalHeight
                     });
+                    // Show image once loaded
+                    img.style.visibility = 'visible';
                 };
 
                 img.onerror = function(e) {
                     console.log('Image load error');
                 };
+
+                // Start animation - loads the GIF
+                window.startAnimation = function() {
+                    if (!isAnimating) {
+                        console.log('Starting animation');
+                        isAnimating = true;
+                        // Setting src triggers the GIF to load and animate
+                        img.src = originalSrc;
+                    }
+                };
+
+                // Stop animation - removes the src to stop loading/animating
+                window.stopAnimation = function() {
+                    if (isAnimating) {
+                        console.log('Stopping animation');
+                        isAnimating = false;
+                        // Clear src to stop animation and free memory
+                        img.removeAttribute('src');
+                        img.style.visibility = 'hidden';
+                    }
+                };
+
+                // Auto-start if desired (can be controlled by Swift)
+                // window.startAnimation();
             </script>
         </body>
         </html>
         """
+    }
+
+    /// Start/resume animation
+    public func startAnimating() {
+        webView?.evaluateJavaScript("window.startAnimation && window.startAnimation()")
+    }
+
+    /// Stop/pause animation
+    public func stopAnimating() {
+        webView?.evaluateJavaScript("window.stopAnimation && window.stopAnimation()")
     }
 
     /// Clean up resources
