@@ -83,9 +83,6 @@ public final class DiskThumbnailCache: @unchecked Sendable {
         // Create directories if they don't exist
         try? fileManager.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: metadataDirectory, withIntermediateDirectories: true)
-
-        print("[DiskThumbnailCache] Initialized - thumbnails: \(thumbnailDirectory.path)")
-        print("[DiskThumbnailCache] Initialized - metadata: \(metadataDirectory.path)")
     }
 
     // MARK: - Cache Key Generation
@@ -206,7 +203,6 @@ public final class DiskThumbnailCache: @unchecked Sendable {
 
         do {
             try data.write(to: path, options: .atomic)
-            print("[DiskThumbnailCache] Saved thumbnail: \(path.lastPathComponent) (\(data.count) bytes, encrypted: \(useEncryption))")
 
             // Remove old unencrypted version if we just wrote encrypted
             if useEncryption {
@@ -214,7 +210,6 @@ public final class DiskThumbnailCache: @unchecked Sendable {
                 try? fileManager.removeItem(at: oldPath)
             }
         } catch {
-            print("[DiskThumbnailCache] Failed to save thumbnail: \(error)")
         }
     }
 
@@ -275,7 +270,6 @@ public final class DiskThumbnailCache: @unchecked Sendable {
 
         do {
             try data.write(to: path, options: .atomic)
-            print("[DiskThumbnailCache] Saved metadata: \(path.lastPathComponent) (\(data.count) bytes, encrypted: \(useEncryption))")
 
             // Remove old unencrypted version if we just wrote encrypted
             if useEncryption {
@@ -283,7 +277,6 @@ public final class DiskThumbnailCache: @unchecked Sendable {
                 try? fileManager.removeItem(at: oldPath)
             }
         } catch {
-            print("[DiskThumbnailCache] Failed to save metadata: \(error)")
         }
     }
 
