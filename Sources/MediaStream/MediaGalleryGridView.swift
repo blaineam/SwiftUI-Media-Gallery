@@ -65,6 +65,7 @@ public struct MediaGalleryFullView: View {
     let filterConfig: MediaGalleryFilterConfig
     let multiSelectActions: [MediaGalleryMultiSelectAction]
     let includeBuiltInShareAction: Bool
+    let initialSlideshowIndex: Int?
     let onDismiss: () -> Void
 
     @State private var showSlideshow = false
@@ -72,6 +73,7 @@ public struct MediaGalleryFullView: View {
     @State private var selectedIndex: Int = 0
     @State private var currentFilter: MediaFilter = .all
     @State private var lastViewedIndex: Int = 0
+    @State private var hasInitializedSlideshow = false
 
     public init(
         mediaItems: [any MediaItem],
@@ -79,6 +81,7 @@ public struct MediaGalleryFullView: View {
         filterConfig: MediaGalleryFilterConfig = MediaGalleryFilterConfig(),
         multiSelectActions: [MediaGalleryMultiSelectAction] = [],
         includeBuiltInShareAction: Bool = true,
+        initialSlideshowIndex: Int? = nil,
         onDismiss: @escaping () -> Void
     ) {
         self.mediaItems = mediaItems
@@ -86,6 +89,7 @@ public struct MediaGalleryFullView: View {
         self.filterConfig = filterConfig
         self.multiSelectActions = multiSelectActions
         self.includeBuiltInShareAction = includeBuiltInShareAction
+        self.initialSlideshowIndex = initialSlideshowIndex
         self.onDismiss = onDismiss
     }
 
@@ -133,6 +137,17 @@ public struct MediaGalleryFullView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: showSlideshow)
+        .onAppear {
+            // If initialSlideshowIndex is set, open directly to slideshow view
+            if let index = initialSlideshowIndex, !hasInitializedSlideshow {
+                hasInitializedSlideshow = true
+                let clampedIndex = min(max(0, index), mediaItems.count - 1)
+                slideshowItems = mediaItems
+                selectedIndex = clampedIndex
+                lastViewedIndex = clampedIndex
+                showSlideshow = true
+            }
+        }
         #if os(iOS)
         .navigationBarHidden(showSlideshow)
         .toolbar(showSlideshow ? .hidden : .visible, for: .navigationBar)
