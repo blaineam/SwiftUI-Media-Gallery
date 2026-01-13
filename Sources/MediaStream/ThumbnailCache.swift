@@ -105,28 +105,58 @@ public final class DiskThumbnailCache: @unchecked Sendable {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
+    // MARK: - Cache Directories (for re-encryption)
+
+    /// Get the cache directories for re-encryption purposes
+    public var cacheDirectories: [URL] {
+        [thumbnailDirectory, metadataDirectory]
+    }
+
     // MARK: - Thumbnail Operations
 
-    /// Get thumbnail file path for a cache key
-    private func thumbnailPath(for key: String) -> URL {
-        thumbnailDirectory.appendingPathComponent("\(key).jpg")
+    /// Get thumbnail file path for a cache key (uses .enc extension when encryption is enabled)
+    private func thumbnailPath(for key: String, encrypted: Bool? = nil) -> URL {
+        let useEncryption = encrypted ?? (MediaStreamConfiguration.encryptionProvider != nil)
+        let ext = useEncryption ? "jpg.enc" : "jpg"
+        return thumbnailDirectory.appendingPathComponent("\(key).\(ext)")
     }
 
-    /// Get metadata file path for a cache key
-    private func metadataPath(for key: String) -> URL {
-        metadataDirectory.appendingPathComponent("\(key).json")
+    /// Get metadata file path for a cache key (uses .enc extension when encryption is enabled)
+    private func metadataPath(for key: String, encrypted: Bool? = nil) -> URL {
+        let useEncryption = encrypted ?? (MediaStreamConfiguration.encryptionProvider != nil)
+        let ext = useEncryption ? "json.enc" : "json"
+        return metadataDirectory.appendingPathComponent("\(key).\(ext)")
     }
 
-    /// Check if a thumbnail exists on disk
+    /// Check if a thumbnail exists on disk (checks both encrypted and unencrypted)
     public func hasThumbnail(for key: String) -> Bool {
-        fileManager.fileExists(atPath: thumbnailPath(for: key).path)
+        fileManager.fileExists(atPath: thumbnailPath(for: key, encrypted: true).path) ||
+        fileManager.fileExists(atPath: thumbnailPath(for: key, encrypted: false).path)
     }
 
-    /// Load a thumbnail from disk
+    /// Load a thumbnail from disk (handles both encrypted and unencrypted)
     public func loadThumbnail(for key: String) -> PlatformImage? {
-        let path = thumbnailPath(for: key)
-        guard fileManager.fileExists(atPath: path.path),
-              let data = try? Data(contentsOf: path) else {
+        // Try encrypted first if provider is available
+        let encryptedPath = thumbnailPath(for: key, encrypted: true)
+        let unencryptedPath = thumbnailPath(for: key, encrypted: false)
+
+        var data: Data?
+        var usedPath: URL?
+
+        if let provider = MediaStreamConfiguration.encryptionProvider,
+           fileManager.fileExists(atPath: encryptedPath.path),
+           let encryptedData = try? Data(contentsOf: encryptedPath) {
+            // Decrypt the data
+            data = try? provider.decrypt(encryptedData)
+            usedPath = encryptedPath
+        } else if fileManager.fileExists(atPath: unencryptedPath.path),
+                  let rawData = try? Data(contentsOf: unencryptedPath) {
+            // Use unencrypted data
+            data = rawData
+            usedPath = unencryptedPath
+        }
+
+        guard let imageData = data, let path = usedPath else {
             return nil
         }
 
@@ -134,68 +164,118 @@ public final class DiskThumbnailCache: @unchecked Sendable {
         try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: path.path)
 
         #if canImport(UIKit)
-        return UIImage(data: data)
+        return UIImage(data: imageData)
         #elseif canImport(AppKit)
-        return NSImage(data: data)
+        return NSImage(data: imageData)
         #endif
     }
 
-    /// Save a thumbnail to disk (skips animated images to preserve animation data)
+    /// Save a thumbnail to disk (encrypts if provider is configured, skips animated images)
     public func saveThumbnail(_ image: PlatformImage, for key: String, isAnimated: Bool = false) {
         // Don't cache animated images - they would lose animation data
         guard !isAnimated else { return }
 
-        let path = thumbnailPath(for: key)
-
         #if canImport(UIKit)
         // Skip if this is an animated UIImage
         if image.images != nil { return }
-        guard let data = image.jpegData(compressionQuality: compressionQuality) else { return }
+        guard var data = image.jpegData(compressionQuality: compressionQuality) else { return }
         #elseif canImport(AppKit)
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return
         }
         let rep = NSBitmapImageRep(cgImage: cgImage)
-        guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality]) else {
+        guard var data = rep.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality]) else {
             return
         }
         #endif
 
+        // Encrypt if provider is available
+        let useEncryption = MediaStreamConfiguration.encryptionProvider != nil
+        if let provider = MediaStreamConfiguration.encryptionProvider {
+            do {
+                data = try provider.encrypt(data)
+            } catch {
+                return // Don't save unencrypted if encryption is expected
+            }
+        }
+
+        let path = thumbnailPath(for: key, encrypted: useEncryption)
+
         do {
             try data.write(to: path, options: .atomic)
+
+            // Remove old unencrypted version if we just wrote encrypted
+            if useEncryption {
+                let oldPath = thumbnailPath(for: key, encrypted: false)
+                try? fileManager.removeItem(at: oldPath)
+            }
         } catch {
         }
     }
 
     // MARK: - Metadata Operations
 
-    /// Check if metadata exists on disk
+    /// Check if metadata exists on disk (checks both encrypted and unencrypted)
     public func hasMetadata(for key: String) -> Bool {
-        fileManager.fileExists(atPath: metadataPath(for: key).path)
+        fileManager.fileExists(atPath: metadataPath(for: key, encrypted: true).path) ||
+        fileManager.fileExists(atPath: metadataPath(for: key, encrypted: false).path)
     }
 
-    /// Load metadata from disk
+    /// Load metadata from disk (handles both encrypted and unencrypted)
     public func loadMetadata(for key: String) -> CachedMediaMetadata? {
-        let path = metadataPath(for: key)
-        guard fileManager.fileExists(atPath: path.path),
-              let data = try? Data(contentsOf: path) else {
+        let encryptedPath = metadataPath(for: key, encrypted: true)
+        let unencryptedPath = metadataPath(for: key, encrypted: false)
+
+        var data: Data?
+        var usedPath: URL?
+
+        if let provider = MediaStreamConfiguration.encryptionProvider,
+           fileManager.fileExists(atPath: encryptedPath.path),
+           let encryptedData = try? Data(contentsOf: encryptedPath) {
+            // Decrypt the data
+            data = try? provider.decrypt(encryptedData)
+            usedPath = encryptedPath
+        } else if fileManager.fileExists(atPath: unencryptedPath.path),
+                  let rawData = try? Data(contentsOf: unencryptedPath) {
+            // Use unencrypted data
+            data = rawData
+            usedPath = unencryptedPath
+        }
+
+        guard let jsonData = data, let path = usedPath else {
             return nil
         }
 
         // Update access time for LRU
         try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: path.path)
 
-        return try? JSONDecoder().decode(CachedMediaMetadata.self, from: data)
+        return try? JSONDecoder().decode(CachedMediaMetadata.self, from: jsonData)
     }
 
-    /// Save metadata to disk
+    /// Save metadata to disk (encrypts if provider is configured)
     public func saveMetadata(_ metadata: CachedMediaMetadata, for key: String) {
-        let path = metadataPath(for: key)
+        guard var data = try? JSONEncoder().encode(metadata) else { return }
 
-        guard let data = try? JSONEncoder().encode(metadata) else { return }
+        // Encrypt if provider is available
+        let useEncryption = MediaStreamConfiguration.encryptionProvider != nil
+        if let provider = MediaStreamConfiguration.encryptionProvider {
+            do {
+                data = try provider.encrypt(data)
+            } catch {
+                return // Don't save unencrypted if encryption is expected
+            }
+        }
+
+        let path = metadataPath(for: key, encrypted: useEncryption)
 
         do {
             try data.write(to: path, options: .atomic)
+
+            // Remove old unencrypted version if we just wrote encrypted
+            if useEncryption {
+                let oldPath = metadataPath(for: key, encrypted: false)
+                try? fileManager.removeItem(at: oldPath)
+            }
         } catch {
         }
     }

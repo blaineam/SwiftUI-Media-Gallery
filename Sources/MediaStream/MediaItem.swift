@@ -15,6 +15,32 @@ public enum MediaType: Sendable {
     case animatedImage
 }
 
+// MARK: - Encryption Provider Protocol
+
+/// Protocol for providing encryption/decryption of cached data
+/// Apps can implement this to encrypt thumbnails and metadata at rest
+public protocol MediaStreamEncryptionProvider: Sendable {
+    /// Encrypt data for storage
+    func encrypt(_ data: Data) throws -> Data
+
+    /// Decrypt data from storage
+    func decrypt(_ data: Data) throws -> Data
+
+    /// Called when the encryption key is about to change
+    /// Provider should re-encrypt all cached data with the new key
+    /// - Parameters:
+    ///   - oldProvider: The provider with the old key (for decryption)
+    ///   - directories: The cache directories that need re-encryption
+    func reencryptCaches(from oldProvider: MediaStreamEncryptionProvider, directories: [URL]) async throws
+}
+
+/// Default implementation for reencryptCaches - can be overridden
+extension MediaStreamEncryptionProvider {
+    public func reencryptCaches(from oldProvider: MediaStreamEncryptionProvider, directories: [URL]) async throws {
+        // Default: no-op, subclasses can override
+    }
+}
+
 // MARK: - HTTP Header Provider
 
 /// Global configuration for HTTP headers and authentication in MediaStream
@@ -53,6 +79,14 @@ public enum MediaStreamConfiguration {
     /// ```
     @MainActor
     public static var credentialProvider: CredentialProvider?
+
+    /// The encryption provider for encrypting cached thumbnails and metadata at rest
+    /// Set this to enable encryption of disk cache
+    /// Example:
+    /// ```
+    /// MediaStreamConfiguration.encryptionProvider = MyEncryptionProvider()
+    /// ```
+    public static var encryptionProvider: MediaStreamEncryptionProvider?
 
     /// Get headers for a URL using the configured provider
     public static func headers(for url: URL) -> [String: String]? {
