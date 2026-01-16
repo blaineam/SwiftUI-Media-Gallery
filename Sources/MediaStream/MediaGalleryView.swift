@@ -29,6 +29,37 @@ public struct MediaGalleryAction: Identifiable {
     }
 }
 
+/// Loop mode for slideshow playback
+public enum LoopMode: Int, CaseIterable {
+    case off      // Stop at end of slideshow
+    case all      // Loop entire slideshow
+    case one      // Repeat current media item
+
+    var icon: String {
+        switch self {
+        case .off: return "repeat.circle"
+        case .all: return "repeat"
+        case .one: return "repeat.1"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .off: return "Loop Off"
+        case .all: return "Loop All"
+        case .one: return "Loop One"
+        }
+    }
+
+    /// Cycle to next mode
+    func next() -> LoopMode {
+        let allCases = LoopMode.allCases
+        let currentIndex = allCases.firstIndex(of: self) ?? 0
+        let nextIndex = (currentIndex + 1) % allCases.count
+        return allCases[nextIndex]
+    }
+}
+
 /// Configuration for the media gallery
 public struct MediaGalleryConfiguration {
     public var slideshowDuration: TimeInterval
@@ -74,6 +105,10 @@ public struct MediaGalleryView: View {
     @State private var videoSlideStartTime: Date?
     @State private var videoLoopCount: Int = 0
     @State private var isFullscreen = false
+    @State private var loopMode: LoopMode = .all
+    @State private var isShuffled = false
+    @State private var shuffledIndices: [Int] = []
+    @State private var shuffledPosition: Int = 0  // Current position in shuffled order
     @FocusState private var isFocused: Bool
 
     /// Number of adjacent items to preload on each side
@@ -258,9 +293,9 @@ public struct MediaGalleryView: View {
                             .padding(.bottom, 20)
                     }
 
-                    // Controls at bottom with extra padding for video controls
+                    // Controls at bottom with extra padding for video/audio controls
                     controlsView
-                        .padding(.bottom, mediaItems[currentIndex].type == .video ? 140 : 20)
+                        .padding(.bottom, (mediaItems[currentIndex].type == .video || mediaItems[currentIndex].type == .audio) ? 140 : 20)
                 }
                 .allowsHitTesting(true)
             }
@@ -428,6 +463,32 @@ public struct MediaGalleryView: View {
             }
             .buttonStyle(.plain)
 
+            // Shuffle toggle button
+            Button(action: { toggleShuffle(); resetControlsTimer() }) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: isShuffled ? "shuffle" : "shuffle")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(isShuffled ? .accentColor : .white)
+                }
+            }
+            .buttonStyle(.plain)
+
+            // Loop mode toggle button
+            Button(action: { cycleLoopMode(); resetControlsTimer() }) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: loopMode.icon)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(loopMode == .off ? .white : .accentColor)
+                }
+            }
+            .buttonStyle(.plain)
+
             // Slideshow Play/Pause button
             Button(action: { toggleSlideshow(); resetControlsTimer() }) {
                 ZStack {
@@ -521,6 +582,32 @@ public struct MediaGalleryView: View {
         }
     }
 
+    private func toggleShuffle() {
+        isShuffled.toggle()
+        if isShuffled {
+            // Create shuffled indices starting from current position
+            shuffledIndices = Array(0..<mediaItems.count).shuffled()
+            // Find current index in shuffled array and move to front
+            if let pos = shuffledIndices.firstIndex(of: currentIndex) {
+                shuffledIndices.remove(at: pos)
+                shuffledIndices.insert(currentIndex, at: 0)
+            }
+            shuffledPosition = 0
+        } else {
+            shuffledIndices = []
+            shuffledPosition = 0
+        }
+    }
+
+    private func cycleLoopMode() {
+        loopMode = loopMode.next()
+    }
+
+    /// Re-shuffle indices for next loop iteration (doesn't start with current)
+    private func reshuffleIndices() {
+        shuffledIndices = Array(0..<mediaItems.count).shuffled()
+    }
+
     private func captionView(caption: String) -> some View {
         ScrollView {
             Text(caption)
@@ -609,14 +696,14 @@ public struct MediaGalleryView: View {
     }
 
     private func checkAndHandleVideo() {
-        // Video playback is handled by ZoomableMediaView
-        // Just track slideshow state for videos
+        // Video/audio playback is handled by ZoomableMediaView
+        // Just track slideshow state for videos and audio
         let currentItem = mediaItems[currentIndex]
-        if currentItem.type == .video {
+        if currentItem.type == .video || currentItem.type == .audio {
             if isSlideshowPlaying {
                 videoSlideStartTime = Date()
                 videoLoopCount = 0
-                print("📺 Video slide started during slideshow")
+                print("📺 Video/audio slide started during slideshow")
             }
         }
     }
@@ -646,11 +733,11 @@ public struct MediaGalleryView: View {
 
         let currentItem = mediaItems[currentIndex]
 
-        // For videos, record start time for duration tracking
-        if currentItem.type == .video {
+        // For videos and audio, record start time for duration tracking
+        if currentItem.type == .video || currentItem.type == .audio {
             videoSlideStartTime = Date()
             videoLoopCount = 0
-            print("📺 Slideshow started on video - will loop until slide duration reached")
+            print("📺 Slideshow started on video/audio - will play to completion")
         } else if currentItem.type == .image || currentItem.type == .animatedImage {
             // Only schedule timer for images and animated images
             Task {
@@ -683,9 +770,9 @@ public struct MediaGalleryView: View {
         let baseDuration = customSlideshowDuration ?? configuration.slideshowDuration
         var duration = baseDuration
 
-        // Videos handle their own completion via onVideoComplete callback
-        // Don't schedule a timer for videos
-        if currentItem.type == .video {
+        // Videos and audio handle their own completion via onVideoComplete callback
+        // Don't schedule a timer for videos or audio
+        if currentItem.type == .video || currentItem.type == .audio {
             return
         }
 
@@ -710,8 +797,51 @@ public struct MediaGalleryView: View {
     }
 
     private func nextItem() {
-        // Always loop: if at last slide, go to first slide
-        let newIndex = (currentIndex + 1) % mediaItems.count
+        let newIndex: Int
+
+        if isShuffled {
+            // In shuffle mode, advance through shuffled order
+            let nextPosition = shuffledPosition + 1
+
+            if nextPosition >= shuffledIndices.count {
+                // Reached end of shuffled list
+                switch loopMode {
+                case .off:
+                    stopSlideshow()
+                    return
+                case .all:
+                    // Re-shuffle for next loop iteration
+                    reshuffleIndices()
+                    shuffledPosition = 0
+                    newIndex = shuffledIndices[0]
+                case .one:
+                    // Stay on current item (will be handled by video completion separately)
+                    return
+                }
+            } else {
+                shuffledPosition = nextPosition
+                newIndex = shuffledIndices[nextPosition]
+            }
+        } else {
+            // Normal sequential order
+            let nextIndex = currentIndex + 1
+
+            if nextIndex >= mediaItems.count {
+                // Reached end of list
+                switch loopMode {
+                case .off:
+                    stopSlideshow()
+                    return
+                case .all:
+                    newIndex = 0
+                case .one:
+                    // Stay on current item
+                    return
+                }
+            } else {
+                newIndex = nextIndex
+            }
+        }
 
         withAnimation(.easeInOut(duration: 0.3)) {
             currentIndex = newIndex
@@ -721,24 +851,58 @@ public struct MediaGalleryView: View {
         onIndexChange?(currentIndex)
 
         if isSlideshowPlaying {
-            let nextItem = mediaItems[currentIndex]
-            // Schedule timer for images and animated images
-            // Videos handle their own completion via onVideoComplete
-            if nextItem.type == .image || nextItem.type == .animatedImage {
-                Task {
-                    await scheduleSlideshowTimer()
-                }
-            } else if nextItem.type == .video {
-                // Video will play automatically via shouldAutoplay
-                // No timer needed - video completion will advance
-            }
+            scheduleNextItemTimer()
         }
     }
 
     private func nextItemAfterVideoCompletion() {
+        // Loop one mode: replay the same video/audio
+        if loopMode == .one {
+            videoLoopCount += 1
+            return
+        }
+
         // Special transition for videos that doesn't start animation until called
         // This ensures video plays to completion before crossfade starts
-        let newIndex = (currentIndex + 1) % mediaItems.count
+        let newIndex: Int
+
+        if isShuffled {
+            let nextPosition = shuffledPosition + 1
+
+            if nextPosition >= shuffledIndices.count {
+                switch loopMode {
+                case .off:
+                    stopSlideshow()
+                    return
+                case .all:
+                    // Re-shuffle for next loop iteration
+                    reshuffleIndices()
+                    shuffledPosition = 0
+                    newIndex = shuffledIndices[0]
+                case .one:
+                    return
+                }
+            } else {
+                shuffledPosition = nextPosition
+                newIndex = shuffledIndices[nextPosition]
+            }
+        } else {
+            let nextIndex = currentIndex + 1
+
+            if nextIndex >= mediaItems.count {
+                switch loopMode {
+                case .off:
+                    stopSlideshow()
+                    return
+                case .all:
+                    newIndex = 0
+                case .one:
+                    return
+                }
+            } else {
+                newIndex = nextIndex
+            }
+        }
 
         withAnimation(.easeInOut(duration: 0.3)) {
             currentIndex = newIndex
@@ -748,23 +912,47 @@ public struct MediaGalleryView: View {
         onIndexChange?(currentIndex)
 
         if isSlideshowPlaying {
-            let nextItem = mediaItems[currentIndex]
-            // Schedule timer for images and animated images
-            // Videos handle their own completion via onVideoComplete
-            if nextItem.type == .image || nextItem.type == .animatedImage {
-                Task {
-                    await scheduleSlideshowTimer()
-                }
-            } else if nextItem.type == .video {
-                // Video will play automatically via shouldAutoplay
-                // No timer needed - video completion will advance
-            }
+            scheduleNextItemTimer()
         }
     }
 
     private func previousItem() {
-        // Always loop: if at first slide, go to last slide
-        let newIndex = currentIndex == 0 ? mediaItems.count - 1 : currentIndex - 1
+        let newIndex: Int
+
+        if isShuffled {
+            let prevPosition = shuffledPosition - 1
+
+            if prevPosition < 0 {
+                switch loopMode {
+                case .off:
+                    // Can't go back further
+                    return
+                case .all:
+                    shuffledPosition = shuffledIndices.count - 1
+                    newIndex = shuffledIndices[shuffledPosition]
+                case .one:
+                    return
+                }
+            } else {
+                shuffledPosition = prevPosition
+                newIndex = shuffledIndices[prevPosition]
+            }
+        } else {
+            let prevIndex = currentIndex - 1
+
+            if prevIndex < 0 {
+                switch loopMode {
+                case .off:
+                    return
+                case .all:
+                    newIndex = mediaItems.count - 1
+                case .one:
+                    return
+                }
+            } else {
+                newIndex = prevIndex
+            }
+        }
 
         withAnimation(.easeInOut(duration: 0.3)) {
             currentIndex = newIndex
@@ -774,18 +962,22 @@ public struct MediaGalleryView: View {
         onIndexChange?(currentIndex)
 
         if isSlideshowPlaying {
-            let prevItem = mediaItems[currentIndex]
-            // Schedule timer for images and animated images
-            // Videos handle their own completion via onVideoComplete
-            if prevItem.type == .image || prevItem.type == .animatedImage {
-                Task {
-                    await scheduleSlideshowTimer()
-                }
-            } else if prevItem.type == .video {
-                // Video will play automatically via shouldAutoplay
-                // No timer needed - video completion will advance
+            scheduleNextItemTimer()
+        }
+    }
+
+    /// Helper to schedule timer based on current item type
+    private func scheduleNextItemTimer() {
+        let item = mediaItems[currentIndex]
+        // Schedule timer for images and animated images
+        // Videos/audio handle their own completion via onVideoComplete
+        if item.type == .image || item.type == .animatedImage {
+            Task {
+                await scheduleSlideshowTimer()
             }
         }
+        // Videos and audio will play automatically via shouldAutoplay
+        // No timer needed - completion callback will advance
     }
 
     private func shareCurrentItem() {

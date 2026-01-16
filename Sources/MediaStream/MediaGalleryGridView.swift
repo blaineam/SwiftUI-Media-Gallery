@@ -13,6 +13,7 @@ public enum MediaFilter: String, CaseIterable {
     case all = "All"
     case images = "Images"
     case videos = "Videos"
+    case audio = "Audio"
     case animated = "Animated"
 
     func matches(_ type: MediaType) -> Bool {
@@ -23,6 +24,8 @@ public enum MediaFilter: String, CaseIterable {
             return type == .image
         case .videos:
             return type == .video
+        case .audio:
+            return type == .audio
         case .animated:
             return type == .animatedImage
         }

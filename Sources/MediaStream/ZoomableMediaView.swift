@@ -573,6 +573,297 @@ struct CustomVideoPlayerView: View {
     }
 }
 
+/// AVFoundation-based audio player controls (no video layer, just controls)
+struct AudioPlayerControlsView: View {
+    let player: AVPlayer
+    let shouldAutoplay: Bool
+    var showControls: Bool = true
+    var onAudioComplete: (() -> Void)? = nil
+    @Binding var savedPosition: Double
+    @Binding var wasAtEnd: Bool
+
+    @State private var isPlaying = false
+    @State private var currentTime: Double = 0
+    @State private var duration: Double = 0
+    @State private var isDragging = false
+    @State private var timeObserver: Any?
+    @State private var endTimeObserver: NSObjectProtocol?
+    @State private var showVolumeSlider = false
+    @State private var scrubPosition: Double = 0
+    @State private var volumeCollapseTimer: Timer?
+    @State private var isReady = false
+
+    @AppStorage("MediaStream_AudioVolume") private var volume: Double = 1.0
+    @AppStorage("MediaStream_AudioMuted") private var isMuted: Bool = false
+
+    var body: some View {
+        Group {
+            if showControls && isReady {
+                HStack(spacing: 12) {
+                    // Play/pause button
+                    Button(action: togglePlayPause) {
+                        ZStack {
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(formatTime(isDragging ? scrubPosition : currentTime))
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .monospacedDigit()
+
+                    Slider(
+                        value: Binding(
+                            get: { isDragging ? scrubPosition : currentTime },
+                            set: { scrubPosition = $0 }
+                        ),
+                        in: 0...max(duration, 0.1),
+                        onEditingChanged: { editing in
+                            if editing {
+                                scrubPosition = currentTime
+                                MediaControlsInteractionState.shared.isInteracting = true
+                            } else {
+                                seekTo(scrubPosition)
+                                MediaControlsInteractionState.shared.isInteracting = false
+                            }
+                            isDragging = editing
+                        }
+                    )
+                    .tint(.white)
+
+                    Text(formatTime(duration))
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .monospacedDigit()
+
+                    // Volume controls
+                    HStack(spacing: 8) {
+                        if showVolumeSlider {
+                            Slider(value: $volume, in: 0...1) { editing in
+                                if !editing {
+                                    applyVolume()
+                                }
+                                resetVolumeCollapseTimer()
+                            }
+                            .frame(width: 80)
+                            .tint(.white)
+                            .onChange(of: volume) { _, newValue in
+                                player.volume = Float(newValue)
+                                if newValue > 0 && isMuted {
+                                    isMuted = false
+                                    player.isMuted = false
+                                }
+                                resetVolumeCollapseTimer()
+                            }
+                        }
+
+                        Button(action: {
+                            if showVolumeSlider {
+                                toggleMute()
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    showVolumeSlider = true
+                                }
+                            }
+                            resetVolumeCollapseTimer()
+                        }) {
+                            ZStack {
+                                Circle()
+                                    .fill(.ultraThinMaterial)
+                                    .frame(width: 36, height: 36)
+                                Image(systemName: volumeIcon)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 20)
+                .blockParentGestures()
+            }
+        }
+        .onAppear {
+            setupPlayer()
+        }
+        .onDisappear {
+            cleanupObservers()
+        }
+        .onChange(of: shouldAutoplay) { _, newValue in
+            if newValue && isReady {
+                player.play()
+                isPlaying = true
+            } else if !newValue {
+                player.pause()
+                isPlaying = false
+            }
+        }
+    }
+
+    private var volumeIcon: String {
+        if isMuted || volume == 0 {
+            return "speaker.slash.fill"
+        } else if volume < 0.33 {
+            return "speaker.fill"
+        } else if volume < 0.66 {
+            return "speaker.wave.1.fill"
+        } else {
+            return "speaker.wave.2.fill"
+        }
+    }
+
+    private func setupPlayer() {
+        // Apply saved volume settings
+        player.volume = Float(volume)
+        player.isMuted = isMuted
+
+        // Restore position if we have one saved
+        if savedPosition > 0 && !wasAtEnd {
+            let cmTime = CMTime(seconds: savedPosition, preferredTimescale: 600)
+            player.seek(to: cmTime)
+        }
+
+        // Add time observer
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            let newTime = CMTimeGetSeconds(time)
+            if newTime.isFinite {
+                currentTime = newTime
+                savedPosition = newTime
+            }
+
+            // Also try to get duration from current item if not set yet
+            if duration == 0, let item = player.currentItem {
+                let dur = CMTimeGetSeconds(item.duration)
+                if dur.isFinite && dur > 0 {
+                    duration = dur
+                }
+            }
+        }
+
+        // Mark as ready immediately so controls appear
+        // Duration will be updated when available
+        isReady = true
+
+        // Autoplay if requested
+        if shouldAutoplay {
+            player.play()
+            isPlaying = true
+        }
+
+        // Get duration when ready (async loading for more accurate duration)
+        if let item = player.currentItem {
+            Task {
+                do {
+                    let dur = try await item.asset.load(.duration)
+                    let seconds = CMTimeGetSeconds(dur)
+                    await MainActor.run {
+                        if seconds.isFinite && seconds > 0 {
+                            duration = seconds
+                        }
+                    }
+                } catch {
+                    print("Failed to load audio duration: \(error)")
+                    // Duration will be updated via time observer as playback progresses
+                }
+            }
+        }
+
+        // Add end observer
+        if let currentItem = player.currentItem {
+            let endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: currentItem,
+                queue: .main
+            ) { notification in
+                let notificationItem = notification.object as? AVPlayerItem
+                Task { @MainActor in
+                    guard let notificationItem = notificationItem,
+                          notificationItem == self.player.currentItem else { return }
+
+                    let currentPos = CMTimeGetSeconds(self.player.currentTime())
+                    let isAtEnd = self.duration > 0 && currentPos >= (self.duration - 0.1)
+                    guard isAtEnd else { return }
+
+                    self.wasAtEnd = true
+                    self.isPlaying = false
+                    self.onAudioComplete?()
+                }
+            }
+            endTimeObserver = endObserver
+        }
+    }
+
+    private func cleanupObservers() {
+        if let observer = timeObserver {
+            player.removeTimeObserver(observer)
+            timeObserver = nil
+        }
+        if let observer = endTimeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            endTimeObserver = nil
+        }
+        volumeCollapseTimer?.invalidate()
+    }
+
+    private func togglePlayPause() {
+        if isPlaying {
+            player.pause()
+        } else {
+            if wasAtEnd {
+                player.seek(to: .zero)
+                wasAtEnd = false
+            }
+            player.play()
+        }
+        isPlaying.toggle()
+    }
+
+    private func toggleMute() {
+        isMuted.toggle()
+        player.isMuted = isMuted
+    }
+
+    private func applyVolume() {
+        player.volume = Float(volume)
+        player.isMuted = isMuted
+    }
+
+    private func resetVolumeCollapseTimer() {
+        volumeCollapseTimer?.invalidate()
+        volumeCollapseTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
+            Task { @MainActor in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showVolumeSlider = false
+                }
+            }
+        }
+    }
+
+    private func seekTo(_ time: Double) {
+        let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+        player.seek(to: cmTime)
+        wasAtEnd = false
+    }
+
+    private func formatTime(_ time: Double) -> String {
+        guard time.isFinite else { return "0:00" }
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
 #if canImport(UIKit)
 struct VideoPlayerRepresentable: UIViewRepresentable {
     let player: AVPlayer
@@ -759,14 +1050,79 @@ struct ZoomableMediaView: View {
     @State private var offset: CGSize = .zero
     @State private var dragStartOffset: CGSize = .zero  // Offset when drag started
     @State private var videoPlayer: AVPlayer?
+    @State private var audioPlayer: AVPlayer?
     @State private var savedVideoPosition: Double = 0.0
+    @State private var savedAudioPosition: Double = 0.0
     @State private var videoWasAtEnd: Bool = false
+    @State private var audioWasAtEnd: Bool = false
     @State private var hasLoadedMedia: Bool = false
+    @State private var useWebViewForVideo: Bool = false  // True for WebM, false for AVFoundation-compatible formats
     @StateObject private var videoController = WebViewVideoController()
     @StateObject private var animatedImageController = WebViewAnimatedImageController()
 
     private let minScale: CGFloat = 1.0
     private let maxScale: CGFloat = 4.0
+
+    /// Audio player view with album artwork and AVFoundation-based playback controls
+    @ViewBuilder
+    private func audioPlayerView(geometry: GeometryProxy) -> some View {
+        ZStack {
+            // Album artwork background (or placeholder)
+            VStack {
+                Spacer()
+                if let artworkImage = image {
+                    #if canImport(UIKit)
+                    Image(uiImage: artworkImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: min(geometry.size.width * 0.7, 400))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(radius: 10)
+                    #elseif canImport(AppKit)
+                    Image(nsImage: artworkImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: min(geometry.size.width * 0.7, 400))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(radius: 10)
+                    #endif
+                } else {
+                    // No artwork - show music note placeholder
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(width: min(geometry.size.width * 0.7, 400), height: min(geometry.size.width * 0.7, 400))
+                        Image(systemName: "music.note")
+                            .font(.system(size: 80))
+                            .foregroundColor(.gray)
+                    }
+                }
+                Spacer()
+            }
+
+            // AVFoundation-based audio playback controls
+            if let player = audioPlayer {
+                VStack {
+                    Spacer()
+                    AudioPlayerControlsView(
+                        player: player,
+                        shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
+                        showControls: showControls,
+                        onAudioComplete: onVideoComplete,
+                        savedPosition: $savedAudioPosition,
+                        wasAtEnd: $audioWasAtEnd
+                    )
+                }
+            } else if isLoading {
+                VStack {
+                    Spacer()
+                    ProgressView()
+                        .tint(.white)
+                        .padding(.bottom, 80)
+                }
+            }
+        }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -835,19 +1191,43 @@ struct ZoomableMediaView: View {
                                 .applyPanGesture(if: scale > minScale, gesture: panGesture(in: geometry))
                             #endif
                         } else if mediaItem.type == .video {
-                            // Use WebView player for all videos (WebM/MP4 support via HTML5)
-                            // Always show the player (webview needs to be in hierarchy to load)
-                            ZStack {
-                                CustomWebViewVideoPlayerView(
-                                    controller: videoController,
-                                    shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
-                                    showControls: showControls && videoController.isReady,
-                                    hasAudio: true,
-                                    onVideoEnd: onVideoComplete
-                                )
+                            if useWebViewForVideo {
+                                // WebM files: Use WebView player (AVFoundation doesn't support WebM)
+                                ZStack {
+                                    CustomWebViewVideoPlayerView(
+                                        controller: videoController,
+                                        shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
+                                        showControls: showControls && videoController.isReady,
+                                        hasAudio: true,
+                                        showVolumeSlider: false,  // Volume slider doesn't work via JS
+                                        onVideoEnd: onVideoComplete
+                                    )
 
-                                // Show loading overlay while video loads
-                                if !videoController.isReady {
+                                    // Show loading overlay while video loads
+                                    if !videoController.isReady {
+                                        Color.black
+                                        if isLoading || videoURL != nil {
+                                            ProgressView()
+                                                .scaleEffect(1.5)
+                                                .tint(.white)
+                                        }
+                                    }
+                                }
+                            } else if let player = videoPlayer {
+                                // Non-WebM: Use AVFoundation with native controls
+                                CustomVideoPlayerView(
+                                    player: player,
+                                    shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
+                                    showControls: showControls,
+                                    isCurrentSlide: isCurrentSlide,
+                                    videoLoopCount: videoLoopCount,
+                                    onVideoComplete: onVideoComplete,
+                                    savedPosition: $savedVideoPosition,
+                                    wasAtEnd: $videoWasAtEnd
+                                )
+                            } else {
+                                // Loading state
+                                ZStack {
                                     Color.black
                                     if isLoading || videoURL != nil {
                                         ProgressView()
@@ -856,15 +1236,18 @@ struct ZoomableMediaView: View {
                                     }
                                 }
                             }
+                        } else if mediaItem.type == .audio {
+                            // Audio player with album artwork background
+                            audioPlayerView(geometry: geometry)
                         }
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            // Only allow double-tap zoom for images, not videos
+            // Only allow double-tap zoom for images, not videos or audio
             .modifier(DoubleTapZoomModifier(
-                isEnabled: mediaItem.type != .video,
+                isEnabled: mediaItem.type != .video && mediaItem.type != .audio,
                 action: { handleDoubleTap(in: geometry) }
             ))
         }
@@ -876,6 +1259,19 @@ struct ZoomableMediaView: View {
             useStreaming = false
             hasLoadedMedia = false
             videoController.stop()
+
+            // Clean up video player (AVFoundation)
+            videoPlayer?.pause()
+            videoPlayer = nil
+            useWebViewForVideo = false
+            savedVideoPosition = 0
+            videoWasAtEnd = false
+
+            // Clean up audio player
+            audioPlayer?.pause()
+            audioPlayer = nil
+            savedAudioPosition = 0
+            audioWasAtEnd = false
 
             // Reset zoom state and notify parent
             scale = 1.0
@@ -890,13 +1286,26 @@ struct ZoomableMediaView: View {
                 if newValue && !oldValue {
                     // When this slide becomes current (and wasn't before), show first frame for videos
                     // Only if not in slideshow mode (slideshow will autoplay)
-                    if !isSlideshowPlaying && videoController.isReady {
-                        videoController.showFirstFrame()
+                    if useWebViewForVideo {
+                        if !isSlideshowPlaying && videoController.isReady {
+                            videoController.showFirstFrame()
+                        }
                     }
+                    // AVPlayer doesn't need "show first frame" - it will autoplay when slideshow starts
                 } else if !newValue && oldValue {
                     // When navigating away from this slide, pause the video
-                    videoController.pause()
+                    if useWebViewForVideo {
+                        videoController.pause()
+                    } else {
+                        videoPlayer?.pause()
+                    }
                 }
+            } else if mediaItem.type == .audio {
+                if !newValue && oldValue {
+                    // When navigating away from this slide, pause the audio
+                    audioPlayer?.pause()
+                }
+                // Audio doesn't need "show first frame" - it just plays or pauses
             } else if mediaItem.type == .animatedImage && useWebViewForAnimatedImage {
                 if newValue && !oldValue {
                     // Became current slide - start animation
@@ -909,18 +1318,51 @@ struct ZoomableMediaView: View {
         }
         .onChange(of: isSlideshowPlaying) { oldValue, newValue in
             // Handle slideshow start/stop for videos on the current slide
-            if mediaItem.type == .video && isCurrentSlide && videoController.isReady {
-                if newValue && !oldValue {
-                    // Slideshow started - play the video
-                    videoController.cancelFirstFrameMode()
-                    if videoController.didReachEnd {
-                        videoController.seekToBeginning()
-                        videoController.didReachEnd = false
+            if mediaItem.type == .video && isCurrentSlide {
+                if useWebViewForVideo && videoController.isReady {
+                    if newValue && !oldValue {
+                        // Slideshow started - play the video
+                        videoController.cancelFirstFrameMode()
+                        if videoController.didReachEnd {
+                            videoController.seekToBeginning()
+                            videoController.didReachEnd = false
+                        }
+                        videoController.play()
+                    } else if !newValue && oldValue {
+                        // Slideshow stopped - pause the video
+                        videoController.pause()
                     }
-                    videoController.play()
-                } else if !newValue && oldValue {
-                    // Slideshow stopped - pause the video
-                    videoController.pause()
+                } else if let player = videoPlayer {
+                    // AVFoundation video player
+                    // Playback is handled by CustomVideoPlayerView via shouldAutoplay binding
+                    if newValue && !oldValue {
+                        // Slideshow started - play the video
+                        if videoWasAtEnd {
+                            player.seek(to: .zero)
+                            videoWasAtEnd = false
+                        }
+                        player.play()
+                    } else if !newValue && oldValue {
+                        // Slideshow stopped - pause the video
+                        player.pause()
+                    }
+                }
+            }
+            // Audio playback is handled by AudioPlayerControlsView via shouldAutoplay binding
+            // The AudioPlayerControlsView observes shouldAutoplay changes directly
+            if mediaItem.type == .audio && isCurrentSlide {
+                if let player = audioPlayer {
+                    if newValue && !oldValue {
+                        // Slideshow started - play audio
+                        if audioWasAtEnd {
+                            player.seek(to: .zero)
+                            audioWasAtEnd = false
+                        }
+                        player.play()
+                    } else if !newValue && oldValue {
+                        // Slideshow stopped - pause audio
+                        player.pause()
+                    }
                 }
             }
         }
@@ -942,6 +1384,11 @@ struct ZoomableMediaView: View {
             useStreaming = false
             useWebViewForAnimatedImage = false
             hasLoadedMedia = false
+
+            // Clean up AVFoundation video player
+            videoPlayer?.pause()
+            videoPlayer = nil
+            useWebViewForVideo = false
 
             // Fully destroy controllers to release WKWebView memory
             videoController.destroy()
@@ -1091,28 +1538,58 @@ struct ZoomableMediaView: View {
                 videoURL = url
                 hasLoadedMedia = true
 
-                // Load video with WebView player (HTML5 video)
-                // Get headers from MediaStreamConfiguration for authenticated requests
-                let headers = await MediaStreamConfiguration.headersAsync(for: url)
+                // Check file extension to determine player type
+                // WebM requires WKWebView (AVFoundation doesn't support WebM/VP8/VP9)
+                let ext = url.pathExtension.lowercased()
+                let isWebM = ext == "webm"
 
-                await MainActor.run {
-                    // Create the webview first if needed
-                    if videoController.webView == nil {
-                        _ = videoController.createWebView()
+                if isWebM {
+                    // WebM: Must use WKWebView player (AVFoundation doesn't support WebM codec)
+                    await MainActor.run {
+                        useWebViewForVideo = true
                     }
-                    videoController.load(url: url, headers: headers)
-                    // Show first frame immediately
-                    // Only do this if:
-                    // 1. Not autoplaying (slideshow will handle playback)
-                    // 2. This is the current slide (don't trigger for pre-rendered adjacent slides)
-                    if !isSlideshowPlaying && isCurrentSlide {
-                        // Wait a bit for video to be ready before showing first frame
-                        Task {
-                            try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
-                            if videoController.isReady {
-                                videoController.showFirstFrame()
+
+                    let headers = await MediaStreamConfiguration.headersAsync(for: url)
+
+                    await MainActor.run {
+                        if videoController.webView == nil {
+                            _ = videoController.createWebView()
+                        }
+                        videoController.load(url: url, headers: headers)
+                        if !isSlideshowPlaying && isCurrentSlide {
+                            Task {
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                if videoController.isReady {
+                                    videoController.showFirstFrame()
+                                }
                             }
                         }
+                    }
+                } else {
+                    // Non-WebM: Try AVFoundation first (better performance/controls)
+                    let playerItem = AVPlayerItem(url: url)
+                    let player = AVPlayer(playerItem: playerItem)
+
+                    // Wait a moment to check if AVPlayer can load the video
+                    do {
+                        // Load asset properties to verify it's playable
+                        let asset = playerItem.asset
+                        let isPlayable = try await asset.load(.isPlayable)
+
+                        if isPlayable {
+                            // AVFoundation can handle this video
+                            await MainActor.run {
+                                useWebViewForVideo = false
+                                videoPlayer = player
+                            }
+                        } else {
+                            // AVFoundation can't play it - fallback to WebView
+                            await fallbackToWebView(url: url)
+                        }
+                    } catch {
+                        // AVFoundation failed - fallback to WebView
+                        print("AVFoundation failed to load video: \(error.localizedDescription), falling back to WebView")
+                        await fallbackToWebView(url: url)
                     }
                 }
             }
@@ -1120,27 +1597,46 @@ struct ZoomableMediaView: View {
             // For audio files, load the album artwork as the image
             if let artwork = await mediaItem.loadImage() {
                 image = artwork
-                hasLoadedMedia = true
-            } else {
-                // No artwork - hasLoadedMedia stays false, UI will show placeholder
-                hasLoadedMedia = true
             }
+            // Mark as loaded even without artwork (placeholder will show)
+            hasLoadedMedia = true
 
-            // Load audio URL for playback
+            // Load audio URL for playback using AVFoundation
             if let url = await mediaItem.loadAudioURL() {
-                videoURL = url // Reuse videoURL for audio playback
-                hasLoadedMedia = true
-
-                // Get headers for authenticated requests
-                let headers = await MediaStreamConfiguration.headersAsync(for: url)
+                // For local files, verify the file exists
+                if url.isFileURL {
+                    guard FileManager.default.fileExists(atPath: url.path) else { return }
+                }
 
                 await MainActor.run {
-                    // Create the webview first if needed
-                    if videoController.webView == nil {
-                        _ = videoController.createWebView()
+                    // Create AVPlayer for audio playback
+                    let playerItem = AVPlayerItem(url: url)
+                    let player = AVPlayer(playerItem: playerItem)
+                    audioPlayer = player
+                }
+            }
+        }
+    }
+
+    /// Fallback to WebView player when AVFoundation can't play the video
+    private func fallbackToWebView(url: URL) async {
+        let headers = await MediaStreamConfiguration.headersAsync(for: url)
+
+        await MainActor.run {
+            useWebViewForVideo = true
+            videoPlayer = nil  // Clear any partial AVPlayer
+
+            if videoController.webView == nil {
+                _ = videoController.createWebView()
+            }
+            videoController.load(url: url, headers: headers)
+
+            if !isSlideshowPlaying && isCurrentSlide {
+                Task {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if videoController.isReady {
+                        videoController.showFirstFrame()
                     }
-                    // Load as audio in the video controller (HTML5 audio)
-                    videoController.load(url: url, headers: headers)
                 }
             }
         }

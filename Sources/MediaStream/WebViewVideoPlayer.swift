@@ -1326,6 +1326,7 @@ public struct CustomWebViewVideoPlayerView: View {
     let shouldAutoplay: Bool
     var showControls: Bool = true
     var hasAudio: Bool = true
+    var showVolumeSlider: Bool = false  // WKWebView: volume slider doesn't work via JS, so disabled by default
     var onVideoEnd: (() -> Void)? = nil
     @Binding var isInteractingWithControls: Bool
 
@@ -1340,6 +1341,7 @@ public struct CustomWebViewVideoPlayerView: View {
         shouldAutoplay: Bool,
         showControls: Bool = true,
         hasAudio: Bool = true,
+        showVolumeSlider: Bool = false,
         onVideoEnd: (() -> Void)? = nil,
         isInteractingWithControls: Binding<Bool> = .constant(false)
     ) {
@@ -1347,6 +1349,7 @@ public struct CustomWebViewVideoPlayerView: View {
         self.shouldAutoplay = shouldAutoplay
         self.showControls = showControls
         self.hasAudio = hasAudio
+        self.showVolumeSlider = showVolumeSlider
         self.onVideoEnd = onVideoEnd
         self._isInteractingWithControls = isInteractingWithControls
     }
