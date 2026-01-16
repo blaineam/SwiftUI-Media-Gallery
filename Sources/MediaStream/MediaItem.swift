@@ -13,6 +13,7 @@ public enum MediaType: Sendable {
     case image
     case video
     case animatedImage
+    case audio
 }
 
 // MARK: - Encryption Provider Protocol
@@ -163,6 +164,32 @@ public protocol MediaItem: Identifiable, Sendable {
 
     /// Check if video has audio track (for video type only)
     func hasAudioTrack() async -> Bool
+
+    /// Load the audio URL (for audio type only)
+    func loadAudioURL() async -> URL?
+
+    /// Get the duration for audio files (in seconds)
+    func getAudioDuration() async -> TimeInterval?
+
+    /// Get audio metadata (title, artist, album)
+    func getAudioMetadata() async -> AudioMetadata?
+}
+
+/// Metadata for audio files
+public struct AudioMetadata: Sendable {
+    public let title: String?
+    public let artist: String?
+    public let album: String?
+    public let trackNumber: Int?
+    public let year: Int?
+
+    public init(title: String? = nil, artist: String? = nil, album: String? = nil, trackNumber: Int? = nil, year: Int? = nil) {
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.trackNumber = trackNumber
+        self.year = year
+    }
 }
 
 // MARK: - Default loadAnimatedImageURL Implementation
@@ -173,6 +200,19 @@ extension MediaItem {
 
     /// Default: no raw data available
     public func loadAnimatedImageData() async -> Data? { nil }
+}
+
+// MARK: - Default Audio Implementation
+
+extension MediaItem {
+    /// Default: no audio URL
+    public func loadAudioURL() async -> URL? { nil }
+
+    /// Default: no audio duration
+    public func getAudioDuration() async -> TimeInterval? { nil }
+
+    /// Default: no audio metadata
+    public func getAudioMetadata() async -> AudioMetadata? { nil }
 }
 
 // MARK: - Default diskCacheKey Implementation
@@ -381,5 +421,106 @@ public struct VideoMediaItem: MediaItem {
         // Use VideoMetadata which properly falls back to HTML5 video for WebM and other formats
         // AVFoundation doesn't support WebM
         return await VideoMetadata.hasAudioTrack(url: url, headers: headers)
+    }
+}
+
+/// Default implementation for audio-based media items
+public struct AudioMediaItem: MediaItem {
+    public let id: UUID
+    public let type: MediaType = .audio
+    public let diskCacheKey: String?
+
+    private let audioURLLoader: @Sendable () async -> URL?
+    private let artworkLoader: (@Sendable () async -> PlatformImage?)?
+    private let durationLoader: (@Sendable () async -> TimeInterval?)?
+    private let metadataLoader: (@Sendable () async -> AudioMetadata?)?
+
+    public init(id: UUID = UUID(),
+                audioURLLoader: @escaping @Sendable () async -> URL?,
+                artworkLoader: (@Sendable () async -> PlatformImage?)? = nil,
+                durationLoader: (@Sendable () async -> TimeInterval?)? = nil,
+                metadataLoader: (@Sendable () async -> AudioMetadata?)? = nil,
+                cacheKey: String? = nil) {
+        self.id = id
+        self.audioURLLoader = audioURLLoader
+        self.artworkLoader = artworkLoader
+        self.durationLoader = durationLoader
+        self.metadataLoader = metadataLoader
+        self.diskCacheKey = cacheKey
+    }
+
+    public func loadImage() async -> PlatformImage? {
+        // For audio, loadImage returns the album artwork
+        if let artworkLoader = artworkLoader {
+            return await artworkLoader()
+        }
+        // Return nil if no artwork available - UI can show placeholder
+        return nil
+    }
+
+    public func loadVideoURL() async -> URL? {
+        nil
+    }
+
+    public func loadAudioURL() async -> URL? {
+        await audioURLLoader()
+    }
+
+    public func getAnimatedImageDuration() async -> TimeInterval? {
+        nil
+    }
+
+    public func getVideoDuration() async -> TimeInterval? {
+        nil
+    }
+
+    public func getAudioDuration() async -> TimeInterval? {
+        if let durationLoader = durationLoader {
+            return await durationLoader()
+        }
+
+        guard let url = await loadAudioURL() else { return nil }
+
+        // Use AVFoundation to get audio duration
+        let headers = await MediaStreamConfiguration.headersAsync(for: url)
+        let asset: AVURLAsset
+        if let headers = headers, !headers.isEmpty {
+            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        } else {
+            asset = AVURLAsset(url: url)
+        }
+
+        do {
+            let duration = try await asset.load(.duration)
+            return CMTimeGetSeconds(duration)
+        } catch {
+            return nil
+        }
+    }
+
+    public func getAudioMetadata() async -> AudioMetadata? {
+        if let metadataLoader = metadataLoader {
+            return await metadataLoader()
+        }
+        return nil
+    }
+
+    public func getShareableItem() async -> Any? {
+        await loadAudioURL()
+    }
+
+    public func getCaption() async -> String? {
+        if let metadata = await getAudioMetadata() {
+            var parts: [String] = []
+            if let title = metadata.title { parts.append(title) }
+            if let artist = metadata.artist { parts.append(artist) }
+            if let album = metadata.album { parts.append(album) }
+            return parts.isEmpty ? nil : parts.joined(separator: "\n")
+        }
+        return nil
+    }
+
+    public func hasAudioTrack() async -> Bool {
+        true // Audio files always have audio
     }
 }

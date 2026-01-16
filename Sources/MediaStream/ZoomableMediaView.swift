@@ -1116,6 +1116,33 @@ struct ZoomableMediaView: View {
                     }
                 }
             }
+        case .audio:
+            // For audio files, load the album artwork as the image
+            if let artwork = await mediaItem.loadImage() {
+                image = artwork
+                hasLoadedMedia = true
+            } else {
+                // No artwork - hasLoadedMedia stays false, UI will show placeholder
+                hasLoadedMedia = true
+            }
+
+            // Load audio URL for playback
+            if let url = await mediaItem.loadAudioURL() {
+                videoURL = url // Reuse videoURL for audio playback
+                hasLoadedMedia = true
+
+                // Get headers for authenticated requests
+                let headers = await MediaStreamConfiguration.headersAsync(for: url)
+
+                await MainActor.run {
+                    // Create the webview first if needed
+                    if videoController.webView == nil {
+                        _ = videoController.createWebView()
+                    }
+                    // Load as audio in the video controller (HTML5 audio)
+                    videoController.load(url: url, headers: headers)
+                }
+            }
         }
     }
 
