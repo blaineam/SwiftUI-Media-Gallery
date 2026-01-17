@@ -33,14 +33,15 @@ A comprehensive SwiftUI package for displaying beautiful media galleries with ad
 - **Auto-disable idle timer** (iOS): Prevents device from sleeping during slideshow playback
 
 ### 📱 Media Type Support
-- **Static Images**: JPEG, PNG, HEIC, etc.
+- **Static Images**: JPEG, PNG, HEIC, RAW (DNG, CR2, NEF, ARW), etc.
 - **Animated Images**: GIF, APNG, HEIF sequences, WebP
-- **Videos**: MP4, MOV, M4V with playback controls
-- **Duration Display**: Shows video length and animated image duration
+- **Videos**: MP4, MOV, M4V, WebM with playback controls
+- **Audio**: MP3, AAC, M4A, FLAC, WAV with artwork and controls
+- **Duration Display**: Shows video/audio length and animated image duration
 
 ### 🎨 Grid View Features
 - **Multi-Select Mode**: Tap to select multiple items with visual indicators
-- **Filtering**: Built-in filter UI (All, Images, Videos, Animated)
+- **Filtering**: Built-in filter UI (All, Images, Videos, Audio, Animated)
 - **Custom Filters**: Apply your own filtering logic
 - **Custom Sorting**: Define custom sort order
 - **Batch Operations**: Share, delete, or perform custom actions on selected items
@@ -66,6 +67,25 @@ A comprehensive SwiftUI package for displaying beautiful media galleries with ad
 - **Improved Gesture Support**: Full zoom/pan support for WebView-based animated images
 - **Simplified Audio Controls**: Mute/unmute toggle with persistent state between videos
 
+### 🎵 Audio Support (v1.6.0)
+- **Audio Media Type**: New `MediaType.audio` for audio file support
+- **Audio Player Controls**: Full-featured playback with:
+  - Play/pause button with elegant circular design
+  - Scrubber slider for seeking with time display
+  - Volume slider with expand/collapse animation
+  - Mute/unmute toggle with persistent state
+  - Progress tracking and duration display
+- **Album Artwork Display**: Shows embedded artwork or custom placeholder
+- **Audio Placeholder Thumbnails**: Gradient background with music note icon when no artwork exists
+- **Audio Metadata**: Title, artist, album, track number, and year support
+- **Slideshow Integration**: Audio files work seamlessly in slideshow with auto-advance
+
+### 📷 RAW Image Support
+- **Native RAW Support**: Leverages iOS/macOS ImageIO for RAW image formats
+- **Supported Formats**: DNG, CR2, CR3, NEF, ARW, ORF, RW2, and other camera RAW formats
+- **Efficient Thumbnails**: Uses CGImageSource for memory-efficient RAW thumbnail generation
+- **Full Resolution Display**: RAW images display at full quality in slideshow view
+
 ## 📦 Installation
 
 ### Swift Package Manager
@@ -84,7 +104,7 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.2.0")
+    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.6.0")
 ]
 ```
 
@@ -296,7 +316,98 @@ struct VideoMediaItem: MediaItem {
 }
 ```
 
-### 3. Configuring the Gallery
+### 3. Audio Implementation
+
+```swift
+struct AudioFileMediaItem: MediaItem {
+    let id: UUID
+    let type: MediaType = .audio
+    private let audioURL: URL
+    private let artworkURL: URL?
+    private let metadata: AudioMetadata?
+
+    init(id: UUID = UUID(), audioURL: URL, artworkURL: URL? = nil, metadata: AudioMetadata? = nil) {
+        self.id = id
+        self.audioURL = audioURL
+        self.artworkURL = artworkURL
+        self.metadata = metadata
+    }
+
+    // Load album artwork for grid view (returns placeholder if nil)
+    func loadImage() async -> PlatformImage? {
+        if let artworkURL = artworkURL {
+            do {
+                let data = try Data(contentsOf: artworkURL)
+                #if canImport(UIKit)
+                return UIImage(data: data)
+                #elseif canImport(AppKit)
+                return NSImage(data: data)
+                #endif
+            } catch {
+                return nil
+            }
+        }
+        // AudioMediaItem automatically returns audio placeholder when artwork is nil
+        return nil
+    }
+
+    // Return audio URL for playback
+    func loadAudioURL() async -> URL? {
+        return audioURL
+    }
+
+    // Return audio duration
+    func getAudioDuration() async -> TimeInterval? {
+        let asset = AVAsset(url: audioURL)
+        return try? await asset.load(.duration).seconds
+    }
+
+    // Return audio metadata for caption display
+    func getAudioMetadata() async -> AudioMetadata? {
+        return metadata
+    }
+
+    func loadVideoURL() async -> URL? { nil }
+    func getAnimatedImageDuration() async -> TimeInterval? { nil }
+    func getVideoDuration() async -> TimeInterval? { nil }
+    func getShareableItem() async -> Any? { audioURL }
+    func getCaption() async -> String? {
+        guard let metadata = metadata else { return nil }
+        var parts: [String] = []
+        if let title = metadata.title { parts.append(title) }
+        if let artist = metadata.artist { parts.append(artist) }
+        if let album = metadata.album { parts.append(album) }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
+    func hasAudioTrack() async -> Bool { true }
+}
+```
+
+### 4. Using Built-in AudioMediaItem
+
+You can also use the built-in `AudioMediaItem` for simple audio playback:
+
+```swift
+let audioItem = AudioMediaItem(
+    audioURLLoader: { return URL(fileURLWithPath: "/path/to/song.mp3") },
+    artworkLoader: {
+        // Load album artwork from ID3 tags or external source
+        return await extractAlbumArt(from: audioURL)
+    },
+    durationLoader: { return 180.0 },
+    metadataLoader: {
+        return AudioMetadata(
+            title: "Song Title",
+            artist: "Artist Name",
+            album: "Album Name",
+            trackNumber: 1,
+            year: 2024
+        )
+    }
+)
+```
+
+### 5. Configuring the Gallery
 
 ```swift
 let config = MediaGalleryConfiguration(
@@ -321,7 +432,7 @@ MediaGalleryView(
 )
 ```
 
-### 4. Custom Filtering and Sorting
+### 5. Custom Filtering and Sorting
 
 ```swift
 let filterConfig = MediaGalleryFilterConfig(
@@ -346,7 +457,7 @@ MediaGalleryGridView(
 )
 ```
 
-### 5. Multi-Select Actions
+### 6. Multi-Select Actions
 
 ```swift
 let multiSelectActions = [
@@ -528,15 +639,40 @@ MediaStream (Package)
 public protocol MediaItem: Identifiable, Sendable {
     var id: UUID { get }
     var type: MediaType { get }
+    var diskCacheKey: String? { get }  // Optional disk caching
+    var sourceURL: URL? { get }        // For animated image streaming
 
     func loadImage() async -> PlatformImage?
-    func loadThumbnail(targetSize: CGFloat) async -> PlatformImage?  // v1.1.0
+    func loadThumbnail(targetSize: CGFloat) async -> PlatformImage?
     func loadVideoURL() async -> URL?
+    func loadAudioURL() async -> URL?              // v1.6.0
     func getAnimatedImageDuration() async -> TimeInterval?
     func getVideoDuration() async -> TimeInterval?
+    func getAudioDuration() async -> TimeInterval? // v1.6.0
+    func getAudioMetadata() async -> AudioMetadata? // v1.6.0
     func getShareableItem() async -> Any?
     func getCaption() async -> String?
     func hasAudioTrack() async -> Bool
+}
+```
+
+### AudioMetadata (v1.6.0)
+
+```swift
+public struct AudioMetadata: Sendable {
+    public let title: String?
+    public let artist: String?
+    public let album: String?
+    public let trackNumber: Int?
+    public let year: Int?
+
+    public init(
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        trackNumber: Int? = nil,
+        year: Int? = nil
+    )
 }
 ```
 
@@ -570,6 +706,7 @@ public enum MediaType {
     case image
     case video
     case animatedImage
+    case audio
 }
 ```
 
