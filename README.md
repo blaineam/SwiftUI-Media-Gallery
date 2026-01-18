@@ -80,6 +80,26 @@ A comprehensive SwiftUI package for displaying beautiful media galleries with ad
 - **Audio Metadata**: Title, artist, album, track number, and year support
 - **Slideshow Integration**: Audio files work seamlessly in slideshow with auto-advance
 
+### 📲 Background Playback & Local Caching (v1.7.0)
+- **Local Media Caching**: Download media files locally for offline/background playback
+  - `MediaDownloadManager`: Singleton for managing downloads and cache
+  - `MediaDownloadButton`: UI component with download/progress/cached states
+  - Files stored in `~/Library/Caches/MediaStream/DownloadedMedia/` (unencrypted for AVPlayer)
+- **Background Audio/Video Playback**: Continue playback when app is backgrounded (cached media only)
+- **Lock Screen & Control Center Integration**:
+  - Play/pause, next/previous track controls
+  - Seek bar with accurate position tracking
+  - Album artwork and metadata display (title, artist, album)
+  - Playback position updates in real-time
+- **Picture-in-Picture (PiP)**: Manual PiP toggle for cached videos
+- **Smart Playback Behavior**:
+  - **Short-form content (< 7 min)**: Starts from beginning (music behavior)
+  - **Long-form content (≥ 7 min)**: Resumes from last position (podcast/movie behavior)
+- **Cache Management**:
+  - Individual item download/clear in slideshow view
+  - Bulk download/clear in grid view
+  - Integrates with "Clear Cache" to remove downloaded media
+
 ### 📷 RAW Image Support
 - **Native RAW Support**: Leverages iOS/macOS ImageIO for RAW image formats
 - **Supported Formats**: DNG, CR2, CR3, NEF, ARW, ORF, RW2, and other camera RAW formats
@@ -104,7 +124,7 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.6.0")
+    .package(url: "https://github.com/blaineam/MediaStream.git", from: "1.7.0")
 ]
 ```
 
@@ -407,7 +427,51 @@ let audioItem = AudioMediaItem(
 )
 ```
 
-### 5. Configuring the Gallery
+### 5. Background Playback with Local Caching (v1.7.0)
+
+```swift
+import SwiftUI
+import MediaStream
+
+struct BackgroundPlaybackExample: View {
+    let mediaItems: [any MediaItem]
+    @ObservedObject private var downloadManager = MediaDownloadManager.shared
+
+    var body: some View {
+        VStack {
+            // Download button for caching media locally
+            MediaDownloadButton(
+                mediaItems: mediaItems,
+                headerProvider: { url in
+                    // Return auth headers if needed for your media URLs
+                    return ["Authorization": "Bearer \(token)"]
+                }
+            )
+
+            // Check cache status
+            if downloadManager.allCached(mediaItems) {
+                Text("All media cached - background playback enabled!")
+            }
+
+            // Open gallery (background playback works automatically for cached items)
+            MediaGalleryView(
+                mediaItems: mediaItems,
+                initialIndex: 0,
+                onDismiss: { }
+            )
+        }
+    }
+}
+```
+
+**Important Notes:**
+- Background playback only works for **cached/downloaded** media items
+- Non-cached media will pause when the app enters background
+- The `diskCacheKey` property on MediaItem is required for caching
+- Lock screen controls (play/pause, next/prev, seek) work automatically
+- Album artwork and metadata display in Control Center when available
+
+### 6. Configuring the Gallery
 
 ```swift
 let config = MediaGalleryConfiguration(
@@ -696,6 +760,135 @@ public final class ThumbnailCache {
     public static func createThumbnail(from image: PlatformImage, targetSize: CGFloat) -> PlatformImage
     public static func createThumbnail(from data: Data, targetSize: CGFloat) -> PlatformImage?
     public static func createThumbnail(from url: URL, targetSize: CGFloat) -> PlatformImage?
+}
+```
+
+### MediaDownloadManager (v1.7.0)
+
+```swift
+@MainActor
+public final class MediaDownloadManager: ObservableObject {
+    public static let shared: MediaDownloadManager
+
+    // Published state
+    @Published public private(set) var downloadState: DownloadState
+    @Published public private(set) var progress: DownloadProgress?
+
+    // Check cache status
+    public func isCached(mediaItem: any MediaItem) -> Bool
+    public func allCached(_ items: [any MediaItem]) -> Bool
+    public func anyCached(_ items: [any MediaItem]) -> Bool
+    public func cachedCount(of items: [any MediaItem]) -> Int
+    public func canCache(_ mediaItem: any MediaItem) -> Bool
+
+    // Get local file URL for cached media
+    public func localURL(for mediaItem: any MediaItem) -> URL?
+
+    // Download operations
+    public func downloadAll(
+        _ items: [any MediaItem],
+        headerProvider: @escaping @Sendable (URL) async -> [String: String]?
+    ) async
+    public func cancelDownload()
+
+    // Clear cache
+    public func clearAllDownloads()
+    public func clearDownloads(for items: [any MediaItem])
+
+    // Cache statistics
+    public var stats: (fileCount: Int, diskMB: Double)
+}
+
+public enum DownloadState: Equatable, Sendable {
+    case idle
+    case downloading(completed: Int, total: Int)
+    case completed
+    case cancelled
+    case failed(String)
+}
+
+public struct DownloadProgress: Sendable {
+    public let completed: Int
+    public let total: Int
+    public let currentItemName: String?
+    public let bytesDownloaded: Int64
+    public let totalBytes: Int64
+    public var fractionCompleted: Double
+    public var currentItemProgress: Double
+}
+```
+
+### MediaDownloadButton (v1.7.0)
+
+```swift
+/// A button that manages downloading and clearing cached media files.
+/// Shows three states: not cached, downloading, cached.
+public struct MediaDownloadButton: View {
+    public init(
+        mediaItems: [any MediaItem],
+        headerProvider: @escaping @Sendable (URL) async -> [String: String]?
+    )
+}
+
+// States:
+// - Not cached: Download icon (arrow.down.circle)
+// - Partially cached: Dotted download icon (arrow.down.circle.dotted)
+// - Downloading: Progress ring with stop button
+// - Cached: Green checkmark (checkmark.circle.fill)
+```
+
+### MediaPlaybackService (v1.7.0)
+
+```swift
+@MainActor
+public final class MediaPlaybackService: NSObject, ObservableObject {
+    public static let shared: MediaPlaybackService
+
+    // Notifications for external player integration
+    public static let shouldPauseForBackgroundNotification: Notification.Name
+    public static let externalPlayNotification: Notification.Name
+    public static let externalPauseNotification: Notification.Name
+    public static let externalSeekNotification: Notification.Name
+    public static let externalTrackChangedNotification: Notification.Name
+
+    // External playback mode (when views own the player)
+    public var externalPlaybackMode: Bool
+
+    // Playlist management
+    public func setPlaylist(_ mediaItems: [any MediaItem], startIndex: Int = 0)
+    public var currentIndex: Int
+    public var loopMode: PlaybackLoopMode
+
+    // Now Playing info for Control Center/Lock Screen
+    public func updateNowPlayingForCurrentItem() async
+    public func updateNowPlayingForExternalPlayer(
+        mediaItem: any MediaItem,
+        title: String?,
+        artist: String?,
+        album: String?,
+        artwork: PlatformImage?,
+        duration: TimeInterval,
+        isVideo: Bool
+    )
+    public func updateExternalPlaybackPosition(
+        currentTime: TimeInterval,
+        duration: TimeInterval,
+        isPlaying: Bool
+    )
+
+    // Picture-in-Picture (iOS only)
+    public func setupPiP(with playerLayer: AVPlayerLayer)
+    public func startPiP()
+    public func stopPiP()
+    public func togglePiP()
+    public var isPiPActive: Bool
+    public var isPiPPossible: Bool
+}
+
+public enum PlaybackLoopMode {
+    case off    // Stop at end
+    case all    // Loop entire playlist
+    case one    // Repeat current track
 }
 ```
 

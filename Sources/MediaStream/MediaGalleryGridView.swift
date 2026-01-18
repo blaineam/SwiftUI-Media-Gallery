@@ -345,11 +345,17 @@ public struct MediaGalleryGridView: View {
                         multiSelectControlBar
                     }
 
-                    // Select and refresh buttons on macOS
+                    // Select, refresh and download buttons on macOS
                     if !isMultiSelectMode {
                         Spacer()
 
                         HStack(spacing: 12) {
+                            // Download button for local caching
+                            MediaDownloadButton(
+                                mediaItems: mediaItems,
+                                headerProvider: { url in await MediaStreamConfiguration.headersAsync(for: url) }
+                            )
+
                             // Refresh button to clear cache
                             Button(action: {
                                 refreshCache()
@@ -397,8 +403,8 @@ public struct MediaGalleryGridView: View {
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                if isMultiSelectMode {
-                    HStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    if isMultiSelectMode {
                         Button("Select All") {
                             selectAll()
                         }
@@ -408,10 +414,16 @@ public struct MediaGalleryGridView: View {
                             clearSelection()
                         }
                         .disabled(selectedItems.isEmpty)
-                    }
-                } else {
-                    Button("Done") {
-                        onDismiss()
+                    } else {
+                        // Download button for local caching
+                        MediaDownloadButton(
+                            mediaItems: mediaItems,
+                            headerProvider: { url in await MediaStreamConfiguration.headersAsync(for: url) }
+                        )
+
+                        Button("Done") {
+                            onDismiss()
+                        }
                     }
                 }
             }
@@ -901,6 +913,9 @@ struct LazyThumbnailView: View {
                     } else if isLoading {
                         Color.gray.opacity(0.3)
                         ProgressView()
+                    } else if mediaItem.type == .audio {
+                        // Show music note placeholder for audio files without artwork
+                        audioPlaceholderView
                     } else {
                         Color.gray.opacity(0.3)
                     }
@@ -1015,7 +1030,21 @@ struct LazyThumbnailView: View {
 
                 // Use the optimized loadThumbnail method which can use ImageIO
                 // for efficient downsampling without loading full image into memory
-                if let thumb = await mediaItem.loadThumbnail(targetSize: ThumbnailCache.thumbnailSize) {
+                var thumb = await mediaItem.loadThumbnail(targetSize: ThumbnailCache.thumbnailSize)
+
+                // If no thumbnail loaded, use fallback placeholder for audio/video
+                if thumb == nil {
+                    switch mediaItem.type {
+                    case .audio:
+                        thumb = ThumbnailCache.createAudioPlaceholder(targetSize: ThumbnailCache.thumbnailSize)
+                    case .video:
+                        thumb = ThumbnailCache.createVideoPlaceholder(targetSize: ThumbnailCache.thumbnailSize)
+                    default:
+                        break
+                    }
+                }
+
+                if let thumb = thumb {
                     // Cache it (both memory and disk if key available, skip disk for animated)
                     ThumbnailCache.shared.set(mediaItem.id, image: thumb, diskCacheKey: diskCacheKey)
 
@@ -1036,6 +1065,16 @@ struct LazyThumbnailView: View {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    /// Music note placeholder view for audio files without artwork
+    private var audioPlaceholderView: some View {
+        ZStack {
+            Color.gray.opacity(0.3)
+            Image(systemName: "music.note")
+                .font(.system(size: 40))
+                .foregroundColor(.gray)
+        }
     }
 }
 

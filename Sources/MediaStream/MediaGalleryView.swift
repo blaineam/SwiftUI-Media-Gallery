@@ -89,6 +89,11 @@ public struct MediaGalleryView: View {
     let onBackToGrid: (() -> Void)?
     let onIndexChange: ((Int) -> Void)?
 
+    /// Background playback service for audio/video
+    @ObservedObject private var playbackService = MediaPlaybackService.shared
+    /// Download manager for observing download state
+    @ObservedObject private var downloadManager = MediaDownloadManager.shared
+
     @State private var currentIndex: Int
     @State private var isSlideshowPlaying = false
     @State private var isZoomed = false
@@ -214,6 +219,31 @@ public struct MediaGalleryView: View {
             .onChange(of: currentIndex) { _, newIndex in
                 handleIndexChanged(newIndex)
             }
+            .onChange(of: playbackService.currentIndex) { _, newServiceIndex in
+                // Sync local index when playback service changes (e.g., from lock screen controls)
+                guard playbackService.externalPlaybackMode else { return }
+                // Map the service index (within cached items) to the full media items index
+                let cachedItems = mediaItems.filter { item in
+                    (item.type == .video || item.type == .audio) &&
+                    MediaDownloadManager.shared.isCached(mediaItem: item)
+                }
+                guard newServiceIndex < cachedItems.count else { return }
+                let cachedItem = cachedItems[newServiceIndex]
+                if let fullIndex = mediaItems.firstIndex(where: { $0.id == cachedItem.id }), fullIndex != currentIndex {
+                    currentIndex = fullIndex
+                }
+            }
+            .onChange(of: downloadManager.downloadState) { _, newState in
+                // Show controls when download starts so user can see progress
+                if case .downloading = newState {
+                    if !showControls {
+                        withAnimation(.easeIn(duration: 0.2)) {
+                            showControls = true
+                        }
+                    }
+                    cancelHideControls()
+                }
+            }
 
             // Controls on top so they receive taps
             if configuration.showControls && showControls {
@@ -232,6 +262,12 @@ public struct MediaGalleryView: View {
 
                         // Right side buttons
                         HStack(spacing: 12) {
+                            // Download button for current item only (slideshow mode)
+                            MediaDownloadButton(
+                                mediaItems: [mediaItems[currentIndex]],
+                                headerProvider: { url in await MediaStreamConfiguration.headersAsync(for: url) }
+                            )
+
                             // Custom action buttons
                             ForEach(configuration.customActions) { customAction in
                                 Button(action: { customAction.action(currentIndex); resetControlsTimer() }) {
@@ -366,10 +402,61 @@ public struct MediaGalleryView: View {
             checkAndHandleVideo()
             loadCaption()
             scheduleHideControls()
+            setupPlaybackService()
         }
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.shouldPauseForBackgroundNotification)) { _ in
+            // Only stop slideshow for NON-CACHED media when entering background
+            // Cached media should continue playing in background
+            let currentItem = mediaItems[currentIndex]
+            guard !MediaDownloadManager.shared.isCached(mediaItem: currentItem) else {
+                return // Don't stop slideshow for cached media
+            }
+
+            if isSlideshowPlaying {
+                stopSlideshow()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalTrackChangedNotification)) { notification in
+            // Handle track changes from lock screen/Control Center controls
+            guard playbackService.externalPlaybackMode else { return }
+            guard let userInfo = notification.userInfo,
+                  let cachedIndex = userInfo["index"] as? Int else { return }
+
+            // Map the cached items index to the full media items index
+            let cachedItems = mediaItems.filter { item in
+                (item.type == .video || item.type == .audio) &&
+                MediaDownloadManager.shared.isCached(mediaItem: item)
+            }
+            guard cachedIndex < cachedItems.count else { return }
+            let cachedItem = cachedItems[cachedIndex]
+
+            if let fullIndex = mediaItems.firstIndex(where: { $0.id == cachedItem.id }), fullIndex != currentIndex {
+                // Check if this is a restart request
+                let isRestart = userInfo["restart"] as? Bool ?? false
+                if isRestart && fullIndex == currentIndex {
+                    // Just need to restart current video/audio - increment loop count
+                    videoLoopCount += 1
+                } else {
+                    // Ensure slideshow is "playing" so the new track auto-plays
+                    if !isSlideshowPlaying {
+                        isSlideshowPlaying = true
+                    }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        currentIndex = fullIndex
+                    }
+                    onIndexChange?(fullIndex)
+                }
+            } else if userInfo["restart"] as? Bool == true {
+                // Restart current item
+                videoLoopCount += 1
+            }
+        }
+        #endif
         .onDisappear {
             stopSlideshow()
             cancelHideControls()
+            cleanupPlaybackService()
 
             // Ensure idle timer is re-enabled when gallery is dismissed
             #if os(iOS)
@@ -489,7 +576,7 @@ public struct MediaGalleryView: View {
             }
             .buttonStyle(.plain)
 
-            // Slideshow Play/Pause button
+            // Slideshow Play/Pause button with duration context menu
             Button(action: { toggleSlideshow(); resetControlsTimer() }) {
                 ZStack {
                     Circle()
@@ -552,6 +639,23 @@ public struct MediaGalleryView: View {
                 }
             }
 
+            // PiP toggle button - only show for video when cached
+            #if canImport(UIKit) && !os(macOS)
+            if mediaItems[currentIndex].type == .video && MediaDownloadManager.shared.isCached(mediaItem: mediaItems[currentIndex]) {
+                Button(action: { playbackService.togglePiP(); resetControlsTimer() }) {
+                    ZStack {
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 36, height: 36)
+                        Image(systemName: playbackService.isPiPActive ? "pip.exit" : "pip.enter")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            #endif
+
             // Caption toggle button (if caption exists)
             if currentCaption != nil {
                 Button(action: { withAnimation { showCaption.toggle() }; resetControlsTimer() }) {
@@ -597,15 +701,80 @@ public struct MediaGalleryView: View {
             shuffledIndices = []
             shuffledPosition = 0
         }
+        // Sync with playback service
+        playbackService.toggleShuffle()
     }
 
     private func cycleLoopMode() {
         loopMode = loopMode.next()
+        // Sync with playback service
+        syncLoopModeToService()
     }
 
     /// Re-shuffle indices for next loop iteration (doesn't start with current)
     private func reshuffleIndices() {
         shuffledIndices = Array(0..<mediaItems.count).shuffled()
+    }
+
+    // MARK: - Background Playback Service Integration
+    // Background playback is only enabled for locally cached media.
+    // iOS kills the rclone rc server when backgrounded, so remote URLs don't work.
+    // See MediaDownloadManager for local caching support.
+
+    /// Setup the playback service for background audio/video playback
+    /// Only includes cached items in the playlist
+    private func setupPlaybackService() {
+        let currentItem = mediaItems[currentIndex]
+
+        // Only enable background playback for cached items
+        guard MediaDownloadManager.shared.isCached(mediaItem: currentItem) else {
+            playbackService.externalPlaybackMode = false
+            return
+        }
+
+        // Filter to only cached video/audio items
+        let cachedItems = mediaItems.filter { item in
+            (item.type == .video || item.type == .audio) &&
+            MediaDownloadManager.shared.isCached(mediaItem: item)
+        }
+
+        guard !cachedItems.isEmpty else {
+            playbackService.externalPlaybackMode = false
+            return
+        }
+
+        // Find the start index within cached items
+        let startIndex = cachedItems.firstIndex(where: { $0.id == currentItem.id }) ?? 0
+
+        // Set up the playlist with cached items
+        playbackService.setPlaylist(cachedItems, startIndex: startIndex)
+        playbackService.externalPlaybackMode = true
+
+        // Track changes from external controls will be observed via playbackService.currentIndex
+        // The onChange handler for playbackService.currentIndex syncs our local state
+        playbackService.onTrackChanged = nil
+
+        // Update Now Playing info with artwork for lock screen/Control Center
+        Task {
+            await playbackService.updateNowPlayingForCurrentItem()
+        }
+    }
+
+    /// Cleanup playback service when gallery is dismissed
+    private func cleanupPlaybackService() {
+        playbackService.externalPlaybackMode = false
+        playbackService.onTrackChanged = nil
+    }
+
+    /// Sync local loop mode to the playback service
+    private func syncLoopModeToService() {
+        let serviceMode: PlaybackLoopMode
+        switch loopMode {
+        case .off: serviceMode = .off
+        case .all: serviceMode = .all
+        case .one: serviceMode = .one
+        }
+        playbackService.loopMode = serviceMode
     }
 
     private func captionView(caption: String) -> some View {
@@ -662,7 +831,8 @@ public struct MediaGalleryView: View {
                 // ALWAYS advance after video completes - videos must play to completion
                 print("📺 ✅ Video fully completed - advancing to next slide after pause")
                 self.videoSlideStartTime = nil
-                self.videoLoopCount = 0
+                // Don't reset videoLoopCount here - nextItemAfterVideoCompletion will increment it
+                // Resetting then incrementing synchronously (1→0→1) causes SwiftUI onChange to miss the change
 
                 // Now animate the transition after the pause
                 self.nextItemAfterVideoCompletion()
@@ -674,22 +844,48 @@ public struct MediaGalleryView: View {
         checkAndHandleVideo()
         loadCaption()
         resetControlsTimer()
+
+        // Sync current index to the playback service (for background controls)
+        if playbackService.externalPlaybackMode {
+            // Find the index within the cached items playlist
+            let cachedItems = mediaItems.filter { item in
+                (item.type == .video || item.type == .audio) &&
+                MediaDownloadManager.shared.isCached(mediaItem: item)
+            }
+            let currentItem = mediaItems[newIndex]
+            if let cachedIndex = cachedItems.firstIndex(where: { $0.id == currentItem.id }) {
+                // Update the service's current index to match our gallery position
+                playbackService.currentIndex = cachedIndex
+            }
+        }
+
+        // Update Now Playing info for the new media item
+        Task {
+            await playbackService.updateNowPlayingForCurrentItem()
+        }
     }
 
     private func loadCaption() {
-        Task {
-            let currentItem = mediaItems[currentIndex]
-            print("📝 MediaGallery: Loading caption for item \(currentIndex + 1)/\(mediaItems.count)")
-            if let caption = await currentItem.getCaption() {
-                print("📝 MediaGallery: Caption loaded: \(caption.prefix(100))...")
-                await MainActor.run {
-                    currentCaption = caption
+        // Capture values to avoid referencing self in detached task
+        let index = currentIndex
+        let item = mediaItems[index]
+        let itemId = item.id
+
+        // Use detached task to ensure caption loading doesn't block UI
+        Task.detached(priority: .userInitiated) {
+            let caption = await item.getCaption()
+
+            await MainActor.run {
+                // Only update if we're still on the same item (user may have swiped)
+                guard self.currentIndex == index && self.mediaItems[self.currentIndex].id == itemId else {
+                    return
                 }
-            } else {
-                print("📝 MediaGallery: No caption available for this item")
-                await MainActor.run {
-                    currentCaption = nil
-                    showCaption = false
+
+                if let caption = caption {
+                    self.currentCaption = caption
+                } else {
+                    self.currentCaption = nil
+                    self.showCaption = false
                 }
             }
         }
@@ -843,6 +1039,21 @@ public struct MediaGalleryView: View {
             }
         }
 
+        // If the new index is the same as current (single item with loop all),
+        // for images/animated images: just reschedule the timer to show again
+        // for videos/audio: increment videoLoopCount to trigger replay
+        if newIndex == currentIndex {
+            let item = mediaItems[currentIndex]
+            if item.type == .video || item.type == .audio {
+                videoLoopCount += 1
+            }
+            // For images, reschedule timer to continue the slideshow on same item
+            if isSlideshowPlaying {
+                scheduleNextItemTimer()
+            }
+            return
+        }
+
         withAnimation(.easeInOut(duration: 0.3)) {
             currentIndex = newIndex
         }
@@ -902,6 +1113,13 @@ public struct MediaGalleryView: View {
             } else {
                 newIndex = nextIndex
             }
+        }
+
+        // If the new index is the same as current (single item with loop all),
+        // increment videoLoopCount to trigger replay instead of setting same index
+        if newIndex == currentIndex {
+            videoLoopCount += 1
+            return
         }
 
         withAnimation(.easeInOut(duration: 0.3)) {
@@ -1067,6 +1285,10 @@ public struct MediaGalleryView: View {
         cancelHideControls()
         hideControlsTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
             Task { @MainActor [self] in
+                // Don't hide controls while downloading - user wants to see progress
+                if case .downloading = MediaDownloadManager.shared.downloadState {
+                    return
+                }
                 withAnimation(.easeOut(duration: 0.3)) {
                     self.showControls = false
                 }

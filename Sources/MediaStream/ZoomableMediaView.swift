@@ -144,6 +144,7 @@ struct AnimatedImageRepresentable: NSViewRepresentable {
 /// Custom video player view with controls
 struct CustomVideoPlayerView: View {
     let player: AVPlayer
+    let mediaItem: any MediaItem
     let shouldAutoplay: Bool
     var showControls: Bool = true
     var isCurrentSlide: Bool = false
@@ -151,6 +152,14 @@ struct CustomVideoPlayerView: View {
     var onVideoComplete: (() -> Void)? = nil
     @Binding var savedPosition: Double
     @Binding var wasAtEnd: Bool
+
+    /// Duration threshold for long-form content (7 minutes)
+    /// Content >= this duration resumes from last position (podcast/movie behavior)
+    /// Content < this duration starts from beginning (music video behavior)
+    private static let longFormThreshold: Double = 420.0 // 7 minutes in seconds
+
+    // Store player layer for PiP setup
+    @State private var currentPlayerLayer: AVPlayerLayer?
 
     @State private var isPlaying = false
     @State private var currentTime: Double = 0
@@ -171,7 +180,23 @@ struct CustomVideoPlayerView: View {
         ZStack {
             // Video player layer
             #if canImport(UIKit)
-            VideoPlayerRepresentable(player: player)
+            VideoPlayerRepresentable(player: player) { playerLayer in
+                // Defer state modification to avoid "Modifying state during view update"
+                DispatchQueue.main.async {
+                    // Store the player layer for PiP setup
+                    currentPlayerLayer = playerLayer
+                    // Setup PiP immediately if this is the current slide
+                    if isCurrentSlide {
+                        MediaPlaybackService.shared.setupPiP(with: playerLayer)
+                    }
+                }
+            }
+            .onChange(of: isCurrentSlide) { _, newValue in
+                // Update PiP when this slide becomes current
+                if newValue, let playerLayer = currentPlayerLayer {
+                    MediaPlaybackService.shared.setupPiP(with: playerLayer)
+                }
+            }
             #elseif canImport(AppKit)
             VideoPlayerRepresentable(player: player)
             #endif
@@ -313,7 +338,11 @@ struct CustomVideoPlayerView: View {
                 let currentPos = CMTimeGetSeconds(player.currentTime())
                 let isAtEnd = duration > 0 && currentPos >= duration - 1.0
 
-                if isAtEnd {
+                // Check if this is short-form content
+                let isLongForm = duration >= Self.longFormThreshold
+
+                if isAtEnd || (!isLongForm && currentPos > 1.0) {
+                    // At end OR short-form content not at beginning: reset to start
                     currentTime = 0.0
                     savedPosition = 0.0
                     wasAtEnd = false
@@ -325,6 +354,7 @@ struct CustomVideoPlayerView: View {
                         }
                     }
                 } else {
+                    // Long-form content: resume from current position
                     player.play()
                     isPlaying = true
                 }
@@ -400,14 +430,26 @@ struct CustomVideoPlayerView: View {
         // Setup observers
         setupObservers()
 
-        // Check if we need to reset from end position
+        // Determine if this is long-form content that should resume
+        let isLongForm = duration >= Self.longFormThreshold
+
+        // Check if we need to reset position
         let currentPos = CMTimeGetSeconds(player.currentTime())
-        if wasAtEnd || (duration > 0 && currentPos >= duration - 1.0) {
+        let isAtEnd = wasAtEnd || (duration > 0 && currentPos >= duration - 1.0)
+
+        if isAtEnd {
+            // Always reset if at end
             currentTime = 0.0
             savedPosition = 0.0
             wasAtEnd = false
             player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        } else if !isLongForm && currentPos > 0 {
+            // Short-form content: start from beginning (music video behavior)
+            currentTime = 0.0
+            savedPosition = 0.0
+            player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         }
+        // Long-form content: keep current position (movie/podcast behavior)
 
         // Start playing if slideshow is active
         if shouldAutoplay {
@@ -428,7 +470,7 @@ struct CustomVideoPlayerView: View {
         }
 
         // Add periodic time observer
-        let observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main) { time in
+        let observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { time in
             // Update current time if not dragging
             Task { @MainActor in
                 let currentTimeValue = CMTimeGetSeconds(time)
@@ -449,6 +491,15 @@ struct CustomVideoPlayerView: View {
 
                 // Update play state
                 self.isPlaying = self.player.rate > 0
+
+                // Update external playback position for cached media (enables lock screen controls)
+                if MediaDownloadManager.shared.isCached(mediaItem: self.mediaItem) {
+                    MediaPlaybackService.shared.updateExternalPlaybackPosition(
+                        currentTime: self.currentTime,
+                        duration: self.duration,
+                        isPlaying: self.isPlaying
+                    )
+                }
             }
         }
         timeObserver = observer
@@ -576,6 +627,7 @@ struct CustomVideoPlayerView: View {
 /// AVFoundation-based audio player controls (no video layer, just controls)
 struct AudioPlayerControlsView: View {
     let player: AVPlayer
+    let mediaItem: any MediaItem
     let shouldAutoplay: Bool
     var showControls: Bool = true
     var isCurrentSlide: Bool = false
@@ -599,15 +651,15 @@ struct AudioPlayerControlsView: View {
     @AppStorage("MediaStream_AudioMuted") private var isMuted: Bool = false
 
     var body: some View {
-        // Only check showControls - no isReady gate that blocks rendering
-        if showControls {
-            HStack(spacing: 12) {
-                // Play/pause button
-                Button(action: togglePlayPause) {
-                    ZStack {
-                        Circle()
-                            .fill(.ultraThinMaterial)
-                            .frame(width: 36, height: 36)
+        // Use opacity instead of conditional to keep time observer running
+        // The view must always be present for lifecycle to work correctly
+        HStack(spacing: 12) {
+            // Play/pause button
+            Button(action: togglePlayPause) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 36, height: 36)
                         Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
@@ -694,18 +746,40 @@ struct AudioPlayerControlsView: View {
             .padding(.bottom, 20)
             .blockParentGestures()
             .onAppear {
-                if !hasSetupPlayer {
+                // Always ensure player is set up when controls appear
+                // (observers may have been cleaned up when controls were hidden)
+                if !hasSetupPlayer || timeObserver == nil {
                     setupPlayer()
                     hasSetupPlayer = true
                 }
             }
             .onDisappear {
+                // Clean up observers when view is truly removed from hierarchy
                 cleanupObservers()
             }
+            .opacity(showControls ? 1 : 0)
+            .allowsHitTesting(showControls)
             .onChange(of: shouldAutoplay) { _, newValue in
                 if newValue {
-                    player.play()
-                    isPlaying = true
+                    // Check if this is short-form content that should start from beginning
+                    let durationSeconds = duration > 0 ? duration : CMTimeGetSeconds(player.currentItem?.duration ?? .zero)
+                    let isLongForm = durationSeconds.isFinite && durationSeconds >= Self.longFormThreshold
+
+                    if !isLongForm && !wasAtEnd {
+                        // Short-form content: start from beginning
+                        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                            Task { @MainActor in
+                                self.currentTime = 0.0
+                                self.savedPosition = 0.0
+                                self.player.play()
+                                self.isPlaying = true
+                            }
+                        }
+                    } else {
+                        // Long-form content: resume from current position
+                        player.play()
+                        isPlaying = true
+                    }
                 } else {
                     player.pause()
                     isPlaying = false
@@ -726,7 +800,6 @@ struct AudioPlayerControlsView: View {
                 }
             }
         }
-    }
 
     private var volumeIcon: String {
         if isMuted || volume == 0 {
@@ -740,19 +813,40 @@ struct AudioPlayerControlsView: View {
         }
     }
 
+    /// Duration threshold for long-form content (7 minutes)
+    /// Content >= this duration resumes from last position (podcast behavior)
+    /// Content < this duration starts from beginning (music behavior)
+    private static let longFormThreshold: Double = 420.0 // 7 minutes in seconds
+
     private func setupPlayer() {
         // Apply saved volume settings
         player.volume = Float(volume)
         player.isMuted = isMuted
 
-        // Restore position if we have one saved
+        // Check duration to determine resume behavior
+        // Long-form content (>= 7 min): Resume from last position
+        // Short-form content (< 7 min): Start from beginning
+        var shouldResumePosition = false
         if savedPosition > 0 && !wasAtEnd {
+            if let currentItem = player.currentItem {
+                let durationSeconds = CMTimeGetSeconds(currentItem.duration)
+                if durationSeconds.isFinite && durationSeconds >= Self.longFormThreshold {
+                    shouldResumePosition = true
+                }
+            }
+        }
+
+        if shouldResumePosition {
             let cmTime = CMTime(seconds: savedPosition, preferredTimescale: 600)
             player.seek(to: cmTime)
+        } else {
+            // Short-form content or no saved position - start from beginning
+            savedPosition = 0
+            player.seek(to: .zero)
         }
 
         // Add time observer
-        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
             Task { @MainActor in
                 let currentTimeValue = CMTimeGetSeconds(time)
@@ -772,6 +866,15 @@ struct AudioPlayerControlsView: View {
 
                 // Update play state
                 self.isPlaying = self.player.rate > 0
+
+                // Update external playback position for cached media (enables lock screen controls)
+                if MediaDownloadManager.shared.isCached(mediaItem: self.mediaItem) {
+                    MediaPlaybackService.shared.updateExternalPlaybackPosition(
+                        currentTime: self.currentTime,
+                        duration: self.duration,
+                        isPlaying: self.isPlaying
+                    )
+                }
             }
         }
         timeObserver = observer
@@ -886,6 +989,7 @@ struct AudioPlayerControlsView: View {
 #if canImport(UIKit)
 struct VideoPlayerRepresentable: UIViewRepresentable {
     let player: AVPlayer
+    var onPlayerLayerReady: ((AVPlayerLayer) -> Void)?
 
     func makeUIView(context: Context) -> PlayerContainerView {
         let view = PlayerContainerView()
@@ -898,6 +1002,9 @@ struct VideoPlayerRepresentable: UIViewRepresentable {
         context.coordinator.playerLayer = playerLayer
         view.playerLayer = playerLayer
 
+        // Notify that the player layer is ready (for PiP setup)
+        onPlayerLayerReady?(playerLayer)
+
         return view
     }
 
@@ -905,6 +1012,10 @@ struct VideoPlayerRepresentable: UIViewRepresentable {
         // Update player if it changed
         if context.coordinator.playerLayer?.player !== player {
             context.coordinator.playerLayer?.player = player
+            // Re-notify with updated layer
+            if let layer = context.coordinator.playerLayer {
+                onPlayerLayerReady?(layer)
+            }
         }
     }
 
@@ -1125,6 +1236,7 @@ struct ZoomableMediaView: View {
                     Spacer()
                     AudioPlayerControlsView(
                         player: player,
+                        mediaItem: mediaItem,
                         shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
                         showControls: showControls,
                         isCurrentSlide: isCurrentSlide,
@@ -1238,6 +1350,7 @@ struct ZoomableMediaView: View {
                                 // Non-WebM: Use AVFoundation with native controls
                                 CustomVideoPlayerView(
                                     player: player,
+                                    mediaItem: mediaItem,
                                     shouldAutoplay: isSlideshowPlaying && isCurrentSlide,
                                     showControls: showControls,
                                     isCurrentSlide: isCurrentSlide,
@@ -1390,6 +1503,69 @@ struct ZoomableMediaView: View {
         .onChange(of: scale) { _, newScale in
             onZoomChanged(newScale > minScale)
         }
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.shouldPauseForBackgroundNotification)) { _ in
+            // Only pause NON-CACHED media when app enters background
+            // Cached media should continue playing in background
+            guard !MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else {
+                return // Don't pause cached media - it should keep playing
+            }
+
+            // Pause non-cached media since rclone server gets killed when app is backgrounded
+            if mediaItem.type == .video {
+                if useWebViewForVideo {
+                    videoController.pause()
+                } else {
+                    videoPlayer?.pause()
+                }
+            } else if mediaItem.type == .audio {
+                audioPlayer?.pause()
+            }
+        }
+        #endif
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalPlayNotification)) { _ in
+            // Handle remote play command for cached media
+            guard isCurrentSlide && MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else { return }
+            if mediaItem.type == .video {
+                if useWebViewForVideo {
+                    videoController.play()
+                } else {
+                    videoPlayer?.play()
+                }
+            } else if mediaItem.type == .audio {
+                audioPlayer?.play()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalPauseNotification)) { _ in
+            // Handle remote pause command for cached media
+            guard isCurrentSlide && MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else { return }
+            if mediaItem.type == .video {
+                if useWebViewForVideo {
+                    videoController.pause()
+                } else {
+                    videoPlayer?.pause()
+                }
+            } else if mediaItem.type == .audio {
+                audioPlayer?.pause()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalSeekNotification)) { notification in
+            // Handle remote seek command for cached media
+            guard isCurrentSlide && MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else { return }
+            guard let time = notification.userInfo?["time"] as? TimeInterval else { return }
+            let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+            if mediaItem.type == .video {
+                if useWebViewForVideo {
+                    videoController.seek(to: time)
+                } else {
+                    videoPlayer?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+            } else if mediaItem.type == .audio {
+                audioPlayer?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
+        #endif
         .onDisappear {
             // Critical: Release memory when view disappears to prevent OOM
             // Delete temp GIF files if they exist
@@ -1550,7 +1726,22 @@ struct ZoomableMediaView: View {
             }
             #endif
         case .video:
-            if let url = await mediaItem.loadVideoURL() {
+            // Check local cache first for background playback support
+            if let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) }),
+               FileManager.default.fileExists(atPath: localURL.path) {
+                // Use local cached file - AVFoundation always handles local files
+                videoURL = localURL
+                hasLoadedMedia = true
+
+                let playerItem = AVPlayerItem(url: localURL)
+                let player = AVPlayer(playerItem: playerItem)
+
+                await MainActor.run {
+                    useWebViewForVideo = false
+                    videoPlayer = player
+                }
+            } else if let url = await mediaItem.loadVideoURL() {
+                // Fall back to remote URL
                 // For local files, verify the file exists
                 if url.isFileURL {
                     guard FileManager.default.fileExists(atPath: url.path) else { return }
@@ -1616,14 +1807,42 @@ struct ZoomableMediaView: View {
             }
         case .audio:
             // For audio files, load the album artwork as the image
-            if let artwork = await mediaItem.loadImage() {
-                image = artwork
+            // Check cache first to avoid re-loading on every swipe
+            let diskCacheKey = mediaItem.diskCacheKey
+            let artworkCacheKey = diskCacheKey.map { $0 + "_artwork" }
+
+            // Try memory cache first
+            if let cached = ThumbnailCache.shared.get(mediaItem.id) {
+                image = cached
             }
+            // Try disk cache
+            else if let cacheKey = artworkCacheKey,
+                    let diskCached = DiskThumbnailCache.shared.loadThumbnail(for: cacheKey) {
+                image = diskCached
+                // Also put in memory cache
+                ThumbnailCache.shared.set(mediaItem.id, image: diskCached, diskCacheKey: nil)
+            }
+            // Load fresh
+            else if let artwork = await mediaItem.loadImage() {
+                image = artwork
+                // Cache it (memory + disk if key available)
+                ThumbnailCache.shared.set(mediaItem.id, image: artwork, diskCacheKey: artworkCacheKey)
+            }
+
             // Mark as loaded even without artwork (placeholder will show)
             hasLoadedMedia = true
 
-            // Load audio URL for playback using AVFoundation
-            if let url = await mediaItem.loadAudioURL() {
+            // Check local cache first for background playback support
+            if let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) }),
+               FileManager.default.fileExists(atPath: localURL.path) {
+                // Use local cached file
+                await MainActor.run {
+                    let playerItem = AVPlayerItem(url: localURL)
+                    let player = AVPlayer(playerItem: playerItem)
+                    audioPlayer = player
+                }
+            } else if let url = await mediaItem.loadAudioURL() {
+                // Fall back to remote URL
                 // For local files, verify the file exists
                 if url.isFileURL {
                     guard FileManager.default.fileExists(atPath: url.path) else {

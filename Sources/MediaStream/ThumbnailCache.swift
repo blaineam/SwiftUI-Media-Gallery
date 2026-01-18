@@ -41,10 +41,12 @@ public struct CachedMediaMetadata: Codable {
 
 /// Public helper to clear all MediaStream caches (memory + disk)
 public enum MediaStreamCache {
-    /// Clear all cached thumbnails and metadata (memory + disk)
+    /// Clear all cached thumbnails, metadata, and downloaded media (memory + disk)
+    @MainActor
     public static func clearAll() {
         ThumbnailCache.shared.clear()
         DiskThumbnailCache.shared.clearAll()
+        MediaDownloadManager.shared.clearAllDownloads()
     }
 
     /// Get cache statistics
@@ -796,15 +798,11 @@ extension ThumbnailCache {
         let size = CGSize(width: targetSize, height: targetSize)
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
-            // Gradient background (dark purple to dark blue)
-            let colors = [
-                UIColor(red: 0.2, green: 0.1, blue: 0.3, alpha: 1.0).cgColor,
-                UIColor(red: 0.1, green: 0.15, blue: 0.35, alpha: 1.0).cgColor
-            ]
-            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1])!
-            context.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+            // Neutral gray background
+            UIColor.gray.withAlphaComponent(0.3).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
 
-            // Draw music note icon
+            // Draw music note icon in gray
             let iconSize: CGFloat = targetSize * 0.4
             let iconRect = CGRect(
                 x: (size.width - iconSize) / 2,
@@ -814,7 +812,7 @@ extension ThumbnailCache {
             )
 
             if let musicIcon = UIImage(systemName: "music.note") {
-                musicIcon.withTintColor(.white, renderingMode: .alwaysOriginal)
+                musicIcon.withTintColor(.gray, renderingMode: .alwaysOriginal)
                     .draw(in: iconRect)
             }
         }
@@ -823,14 +821,11 @@ extension ThumbnailCache {
         let image = NSImage(size: size)
         image.lockFocus()
 
-        // Gradient background (dark purple to dark blue)
-        let gradient = NSGradient(colors: [
-            NSColor(red: 0.2, green: 0.1, blue: 0.3, alpha: 1.0),
-            NSColor(red: 0.1, green: 0.15, blue: 0.35, alpha: 1.0)
-        ])
-        gradient?.draw(in: NSRect(origin: .zero, size: size), angle: 270)
+        // Neutral gray background
+        NSColor.gray.withAlphaComponent(0.3).setFill()
+        NSRect(origin: .zero, size: size).fill()
 
-        // Draw music note icon
+        // Draw music note icon in gray
         if let musicIcon = NSImage(systemSymbolName: "music.note", accessibilityDescription: "Audio") {
             let iconSize: CGFloat = targetSize * 0.4
             let iconRect = NSRect(
@@ -839,6 +834,7 @@ extension ThumbnailCache {
                 width: iconSize,
                 height: iconSize
             )
+            NSColor.gray.set()
             musicIcon.draw(in: iconRect)
         }
 
