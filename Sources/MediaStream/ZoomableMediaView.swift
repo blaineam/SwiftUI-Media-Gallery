@@ -1167,6 +1167,11 @@ struct ZoomableMediaView: View {
     private let minScale: CGFloat = 1.0
     private let maxScale: CGFloat = 4.0
 
+    /// Maximum display size for images to prevent OOM with large files.
+    /// At 4x zoom on a typical device (430pt width * 3x scale * 4x zoom = ~5160px),
+    /// we need at most ~2000px for display. Full resolution only needed for sharing.
+    private static let maxDisplayPixelSize: CGFloat = 2000
+
     /// Audio player view with album artwork and AVFoundation-based playback controls
     @ViewBuilder
     private func audioPlayerView(geometry: GeometryProxy) -> some View {
@@ -1586,7 +1591,10 @@ struct ZoomableMediaView: View {
         switch mediaItem.type {
         case .image:
             if let loadedImage = await mediaItem.loadImage() {
-                image = loadedImage
+                // Downsample large images to prevent OOM with 40MB+ files
+                // A 8000x6000 image decodes to ~192MB - with 3 visible, that's 576MB causing OOM
+                // Downsample to maxDisplayPixelSize for display; full resolution only for sharing
+                image = Self.downsampleForDisplay(loadedImage)
                 hasLoadedMedia = true
             }
         case .animatedImage:
@@ -1945,5 +1953,51 @@ struct ZoomableMediaView: View {
                 offset = constrainOffset(offset, in: geometry)
             }
         }
+    }
+
+    /// Downsample large images to prevent OOM when viewing many large files.
+    /// Images are downsampled to maxDisplayPixelSize which is sufficient for display
+    /// at maximum zoom (4x) on typical devices. Full resolution is only loaded for sharing.
+    private static func downsampleForDisplay(_ image: PlatformImage) -> PlatformImage {
+        #if canImport(UIKit)
+        let maxDimension = max(image.size.width, image.size.height) * image.scale
+        #else
+        let maxDimension = max(image.size.width, image.size.height)
+        #endif
+
+        // If image is already small enough, return as-is
+        guard maxDimension > maxDisplayPixelSize else {
+            return image
+        }
+
+        // Calculate the scale factor to fit within maxDisplayPixelSize
+        let scaleFactor = maxDisplayPixelSize / maxDimension
+
+        #if canImport(UIKit)
+        let newSize = CGSize(
+            width: image.size.width * scaleFactor,
+            height: image.size.height * scaleFactor
+        )
+
+        // Use UIGraphicsImageRenderer for efficient resizing
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+        #elseif canImport(AppKit)
+        let newSize = NSSize(
+            width: image.size.width * scaleFactor,
+            height: image.size.height * scaleFactor
+        )
+
+        let newImage = NSImage(size: newSize)
+        newImage.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: newSize),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy,
+                   fraction: 1.0)
+        newImage.unlockFocus()
+        return newImage
+        #endif
     }
 }
