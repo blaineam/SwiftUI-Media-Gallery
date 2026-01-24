@@ -1711,6 +1711,29 @@ struct ZoomableMediaView: View {
                 audioPlayer?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            // Sync view state with actual player state when returning from background
+            // This ensures in-app controls reflect the correct playback position
+            guard isCurrentSlide else { return }
+
+            if let player = audioPlayer {
+                let playerTime = CMTimeGetSeconds(player.currentTime())
+                let playerRate = player.rate
+                if playerTime.isFinite {
+                    currentTime = playerTime
+                }
+                isPlaying = playerRate > 0
+                print("[ZoomableMediaView] Synced audio state on foreground: time=\(playerTime), playing=\(isPlaying)")
+            } else if let player = videoPlayer {
+                let playerTime = CMTimeGetSeconds(player.currentTime())
+                let playerRate = player.rate
+                if playerTime.isFinite {
+                    currentTime = playerTime
+                }
+                isPlaying = playerRate > 0
+                print("[ZoomableMediaView] Synced video state on foreground: time=\(playerTime), playing=\(isPlaying)")
+            }
+        }
         #endif
         .onDisappear {
             // Critical: Release memory when view disappears to prevent OOM
