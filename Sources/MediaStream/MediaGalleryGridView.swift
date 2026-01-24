@@ -70,6 +70,7 @@ public struct MediaGalleryFullView: View {
     let includeBuiltInShareAction: Bool
     let initialSlideshowIndex: Int?
     let onDismiss: () -> Void
+    let onIndexChange: ((Int) -> Void)?
 
     @State private var showSlideshow = false
     @State private var slideshowItems: [any MediaItem] = []
@@ -85,7 +86,8 @@ public struct MediaGalleryFullView: View {
         multiSelectActions: [MediaGalleryMultiSelectAction] = [],
         includeBuiltInShareAction: Bool = true,
         initialSlideshowIndex: Int? = nil,
-        onDismiss: @escaping () -> Void
+        onDismiss: @escaping () -> Void,
+        onIndexChange: ((Int) -> Void)? = nil
     ) {
         self.mediaItems = mediaItems
         self.configuration = configuration
@@ -94,6 +96,7 @@ public struct MediaGalleryFullView: View {
         self.includeBuiltInShareAction = includeBuiltInShareAction
         self.initialSlideshowIndex = initialSlideshowIndex
         self.onDismiss = onDismiss
+        self.onIndexChange = onIndexChange
     }
 
     public var body: some View {
@@ -134,6 +137,7 @@ public struct MediaGalleryFullView: View {
                     },
                     onIndexChange: { index in
                         lastViewedIndex = index
+                        onIndexChange?(index)
                     }
                 )
                 .transition(.opacity)

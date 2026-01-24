@@ -150,6 +150,7 @@ struct CustomVideoPlayerView: View {
     var isCurrentSlide: Bool = false
     var videoLoopCount: Int = 0
     var onVideoComplete: (() -> Void)? = nil
+    var onManualPlayTriggered: (() -> Void)? = nil
     @Binding var savedPosition: Double
     @Binding var wasAtEnd: Bool
 
@@ -171,6 +172,8 @@ struct CustomVideoPlayerView: View {
     @State private var showVolumeSlider = false
     @State private var scrubPosition: Double = 0
     @State private var volumeCollapseTimer: Timer?
+    @State private var hasInitializedNowPlaying = false
+    @State private var wasPlayingBeforeUpdate = false
 
     // Persist volume preference across media items
     @AppStorage("MediaStream_VideoVolume") private var volume: Double = 1.0
@@ -364,6 +367,11 @@ struct CustomVideoPlayerView: View {
             }
         }
         .onChange(of: isCurrentSlide) { oldValue, newValue in
+            // When this slide is no longer current, pause the video
+            if !newValue && oldValue {
+                player.pause()
+                isPlaying = false
+            }
             // When this video becomes the current slide, just reset if at end
             if newValue && !oldValue {
                 let currentPos = CMTimeGetSeconds(player.currentTime())
@@ -476,10 +484,54 @@ struct CustomVideoPlayerView: View {
                 }
 
                 // Update play state
-                self.isPlaying = self.player.rate > 0
+                let nowPlaying = self.player.rate > 0
+                let justStartedPlaying = nowPlaying && !self.wasPlayingBeforeUpdate
+                self.wasPlayingBeforeUpdate = nowPlaying
+                self.isPlaying = nowPlaying
 
                 // Update external playback position for cached media (enables lock screen controls)
                 if MediaDownloadManager.shared.isCached(mediaItem: self.mediaItem) {
+                    // Enable external playback mode so remote commands are relayed to views
+                    if !MediaPlaybackService.shared.externalPlaybackMode {
+                        MediaPlaybackService.shared.externalPlaybackMode = true
+                    }
+                    // Register player for direct control (faster than notifications in background)
+                    MediaPlaybackService.shared.registerExternalPlayer(self.player, forMediaId: self.mediaItem.id)
+
+                    // Initialize Now Playing metadata when playback first starts
+                    if justStartedPlaying && !self.hasInitializedNowPlaying {
+                        self.hasInitializedNowPlaying = true
+                        let item = self.mediaItem
+                        let currentDuration = self.duration
+                        Task {
+                            // Load metadata directly from the media item
+                            let metadata = await item.getAudioMetadata()
+                            let artwork = await item.loadImage()
+
+                            // Get title from metadata or filename
+                            var title = metadata?.title
+                            if title == nil || title?.isEmpty == true {
+                                if let cacheKey = item.diskCacheKey {
+                                    title = URL(fileURLWithPath: cacheKey).deletingPathExtension().lastPathComponent
+                                } else if let sourceURL = item.sourceURL {
+                                    title = sourceURL.deletingPathExtension().lastPathComponent
+                                }
+                            }
+
+                            await MainActor.run {
+                                MediaPlaybackService.shared.updateNowPlayingForExternalPlayer(
+                                    mediaItem: item,
+                                    title: title,
+                                    artist: metadata?.artist,
+                                    album: metadata?.album,
+                                    artwork: artwork,
+                                    duration: currentDuration,
+                                    isVideo: true
+                                )
+                            }
+                        }
+                    }
+
                     MediaPlaybackService.shared.updateExternalPlaybackPosition(
                         currentTime: self.currentTime,
                         duration: self.duration,
@@ -554,6 +606,8 @@ struct CustomVideoPlayerView: View {
             }
             player.play()
             wasAtEnd = false
+            // Notify that playback was manually triggered (can start slideshow)
+            onManualPlayTriggered?()
         }
         isPlaying.toggle()
     }
@@ -619,6 +673,7 @@ struct AudioPlayerControlsView: View {
     var isCurrentSlide: Bool = false
     var videoLoopCount: Int = 0
     var onAudioComplete: (() -> Void)? = nil
+    var onManualPlayTriggered: (() -> Void)? = nil
     @Binding var savedPosition: Double
     @Binding var wasAtEnd: Bool
 
@@ -632,6 +687,8 @@ struct AudioPlayerControlsView: View {
     @State private var scrubPosition: Double = 0
     @State private var volumeCollapseTimer: Timer?
     @State private var hasSetupPlayer = false
+    @State private var hasInitializedNowPlaying = false
+    @State private var wasPlayingBeforeUpdate = false
 
     @AppStorage("MediaStream_AudioVolume") private var volume: Double = 1.0
     @AppStorage("MediaStream_AudioMuted") private var isMuted: Bool = false
@@ -773,6 +830,13 @@ struct AudioPlayerControlsView: View {
                     }
                 }
             }
+            .onChange(of: isCurrentSlide) { oldValue, newValue in
+                // When this slide is no longer current, pause the audio
+                if !newValue && oldValue {
+                    player.pause()
+                    isPlaying = false
+                }
+            }
         }
 
     private var volumeIcon: String {
@@ -839,10 +903,54 @@ struct AudioPlayerControlsView: View {
                 }
 
                 // Update play state
-                self.isPlaying = self.player.rate > 0
+                let nowPlaying = self.player.rate > 0
+                let justStartedPlaying = nowPlaying && !self.wasPlayingBeforeUpdate
+                self.wasPlayingBeforeUpdate = nowPlaying
+                self.isPlaying = nowPlaying
 
                 // Update external playback position for cached media (enables lock screen controls)
                 if MediaDownloadManager.shared.isCached(mediaItem: self.mediaItem) {
+                    // Enable external playback mode so remote commands are relayed to views
+                    if !MediaPlaybackService.shared.externalPlaybackMode {
+                        MediaPlaybackService.shared.externalPlaybackMode = true
+                    }
+                    // Register player for direct control (faster than notifications in background)
+                    MediaPlaybackService.shared.registerExternalPlayer(self.player, forMediaId: self.mediaItem.id)
+
+                    // Initialize Now Playing metadata when playback first starts
+                    if justStartedPlaying && !self.hasInitializedNowPlaying {
+                        self.hasInitializedNowPlaying = true
+                        let item = self.mediaItem
+                        let currentDuration = self.duration
+                        Task {
+                            // Load metadata directly from the media item
+                            let metadata = await item.getAudioMetadata()
+                            let artwork = await item.loadImage()
+
+                            // Get title from metadata or filename
+                            var title = metadata?.title
+                            if title == nil || title?.isEmpty == true {
+                                if let cacheKey = item.diskCacheKey {
+                                    title = URL(fileURLWithPath: cacheKey).deletingPathExtension().lastPathComponent
+                                } else if let sourceURL = item.sourceURL {
+                                    title = sourceURL.deletingPathExtension().lastPathComponent
+                                }
+                            }
+
+                            await MainActor.run {
+                                MediaPlaybackService.shared.updateNowPlayingForExternalPlayer(
+                                    mediaItem: item,
+                                    title: title,
+                                    artist: metadata?.artist,
+                                    album: metadata?.album,
+                                    artwork: artwork,
+                                    duration: currentDuration,
+                                    isVideo: false
+                                )
+                            }
+                        }
+                    }
+
                     MediaPlaybackService.shared.updateExternalPlaybackPosition(
                         currentTime: self.currentTime,
                         duration: self.duration,
@@ -921,6 +1029,8 @@ struct AudioPlayerControlsView: View {
                 wasAtEnd = false
             }
             player.play()
+            // Notify that playback was manually triggered (can start slideshow)
+            onManualPlayTriggered?()
         }
         isPlaying.toggle()
     }
@@ -1171,6 +1281,7 @@ struct ZoomableMediaView: View {
     var isCurrentSlide: Bool = false
     var videoLoopCount: Int = 0
     var onVideoComplete: (() -> Void)? = nil
+    var onManualPlayTriggered: (() -> Void)? = nil
 
     @State private var image: PlatformImage?
     @State private var videoURL: URL?
@@ -1251,6 +1362,7 @@ struct ZoomableMediaView: View {
                         isCurrentSlide: isCurrentSlide,
                         videoLoopCount: videoLoopCount,
                         onAudioComplete: onVideoComplete,
+                        onManualPlayTriggered: onManualPlayTriggered,
                         savedPosition: $savedAudioPosition,
                         wasAtEnd: $audioWasAtEnd
                     )
@@ -1362,6 +1474,7 @@ struct ZoomableMediaView: View {
                                     isCurrentSlide: isCurrentSlide,
                                     videoLoopCount: videoLoopCount,
                                     onVideoComplete: onVideoComplete,
+                                    onManualPlayTriggered: onManualPlayTriggered,
                                     savedPosition: $savedVideoPosition,
                                     wasAtEnd: $videoWasAtEnd
                                 )
@@ -1512,11 +1625,20 @@ struct ZoomableMediaView: View {
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.shouldPauseForBackgroundNotification)) { _ in
             // Only pause NON-CACHED media when app enters background
             // Cached media should continue playing in background
-            guard !MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else {
+            let isCached = MediaDownloadManager.shared.isCached(mediaItem: mediaItem)
+            let diskCacheKey = mediaItem.diskCacheKey
+            let localURL = MediaDownloadManager.shared.localURL(for: mediaItem)
+            print("[ZoomableMediaView] Background check - isCached: \(isCached), diskCacheKey: \(diskCacheKey ?? "nil"), localURL: \(localURL?.path ?? "nil")")
+
+            if isCached {
+                // Keep audio session active for cached media background playback
+                try? AVAudioSession.sharedInstance().setActive(true)
+                print("[ZoomableMediaView] ✅ Background: keeping cached media playing")
                 return // Don't pause cached media - it should keep playing
             }
 
             // Pause non-cached media since rclone server gets killed when app is backgrounded
+            print("[ZoomableMediaView] ⚠️ Background: pausing non-cached media (type: \(mediaItem.type))")
             if mediaItem.type == .video {
                 if useWebViewForVideo {
                     videoController.pause()
@@ -1531,7 +1653,19 @@ struct ZoomableMediaView: View {
         #if canImport(UIKit)
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalPlayNotification)) { _ in
             // Handle remote play command for cached media
-            guard isCurrentSlide && MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else { return }
+            // Note: We check isCurrentSlide but also allow if this view's player is registered OR paused
+            // This handles edge cases where isCurrentSlide might be stale in background
+            let isCached = MediaDownloadManager.shared.isCached(mediaItem: mediaItem)
+            let isRegisteredPlayer = (mediaItem.type == .audio && audioPlayer != nil && MediaPlaybackService.shared.externalPlayer === audioPlayer) ||
+                                    (mediaItem.type == .video && videoPlayer != nil && MediaPlaybackService.shared.externalPlayer === videoPlayer)
+            // Also consider this player if it exists and is paused (might be the one we want to resume)
+            let hasPausedPlayer = (mediaItem.type == .audio && audioPlayer != nil && audioPlayer!.rate == 0) ||
+                                  (mediaItem.type == .video && videoPlayer != nil && videoPlayer!.rate == 0)
+            guard isCached && (isCurrentSlide || isRegisteredPlayer || hasPausedPlayer) else { return }
+
+            // Ensure audio session is active for background playback
+            try? AVAudioSession.sharedInstance().setActive(true)
+
             if mediaItem.type == .video {
                 if useWebViewForVideo {
                     videoController.play()
@@ -1544,7 +1678,14 @@ struct ZoomableMediaView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalPauseNotification)) { _ in
             // Handle remote pause command for cached media
-            guard isCurrentSlide && MediaDownloadManager.shared.isCached(mediaItem: mediaItem) else { return }
+            // More lenient check: if our player is playing, we should pause it
+            let isCached = MediaDownloadManager.shared.isCached(mediaItem: mediaItem)
+            let isRegisteredPlayer = (mediaItem.type == .audio && audioPlayer != nil && MediaPlaybackService.shared.externalPlayer === audioPlayer) ||
+                                    (mediaItem.type == .video && videoPlayer != nil && MediaPlaybackService.shared.externalPlayer === videoPlayer)
+            // Also pause if our player is actively playing (rate > 0) - this catches orphaned players
+            let hasPlayingPlayer = (mediaItem.type == .audio && audioPlayer != nil && audioPlayer!.rate > 0) ||
+                                   (mediaItem.type == .video && videoPlayer != nil && videoPlayer!.rate > 0)
+            guard isCached && (isCurrentSlide || isRegisteredPlayer || hasPlayingPlayer) else { return }
             if mediaItem.type == .video {
                 if useWebViewForVideo {
                     videoController.pause()
@@ -1587,10 +1728,20 @@ struct ZoomableMediaView: View {
             useWebViewForAnimatedImage = false
             hasLoadedMedia = false
 
-            // Clean up AVFoundation video player
+            // Unregister and clean up AVFoundation video player
+            if let player = videoPlayer {
+                MediaPlaybackService.shared.unregisterExternalPlayer(player, forMediaId: mediaItem.id)
+            }
             videoPlayer?.pause()
             videoPlayer = nil
             useWebViewForVideo = false
+
+            // Unregister and clean up audio player
+            if let player = audioPlayer {
+                MediaPlaybackService.shared.unregisterExternalPlayer(player, forMediaId: mediaItem.id)
+            }
+            audioPlayer?.pause()
+            audioPlayer = nil
 
             // Fully destroy controllers to release WKWebView memory
             videoController.destroy()
@@ -1841,9 +1992,12 @@ struct ZoomableMediaView: View {
             hasLoadedMedia = true
 
             // Check local cache first for background playback support
-            if let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) }),
-               FileManager.default.fileExists(atPath: localURL.path) {
+            let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) })
+            print("[ZoomableMediaView] Audio cache check - diskCacheKey: \(diskCacheKey ?? "nil"), localURL: \(localURL?.path ?? "nil")")
+
+            if let localURL = localURL, FileManager.default.fileExists(atPath: localURL.path) {
                 // Use local cached file
+                print("[ZoomableMediaView] ✅ Using CACHED audio file: \(localURL.path)")
                 await MainActor.run {
                     let playerItem = AVPlayerItem(url: localURL)
                     let player = AVPlayer(playerItem: playerItem)
@@ -1851,6 +2005,7 @@ struct ZoomableMediaView: View {
                 }
             } else if let url = await mediaItem.loadAudioURL() {
                 // Fall back to remote URL
+                print("[ZoomableMediaView] ⚠️ Using REMOTE audio URL: \(url)")
                 // For local files, verify the file exists
                 if url.isFileURL {
                     guard FileManager.default.fileExists(atPath: url.path) else {

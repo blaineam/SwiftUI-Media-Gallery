@@ -187,6 +187,12 @@ public struct MediaGalleryView: View {
                         videoLoopCount: currentIndex == index ? videoLoopCount : 0,
                         onVideoComplete: {
                             handleVideoComplete()
+                        },
+                        onManualPlayTriggered: {
+                            // Start slideshow when user manually plays media
+                            if !isSlideshowPlaying {
+                                startSlideshow()
+                            }
                         }
                     )
                     .opacity(currentIndex == index ? 1 : 0)
