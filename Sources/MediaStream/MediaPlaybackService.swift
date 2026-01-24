@@ -417,7 +417,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         // Play command
         commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote PLAY command received")
+            Task { @MainActor in
                 self?.play()
             }
             return .success
@@ -426,7 +427,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         // Pause command
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote PAUSE command received")
+            Task { @MainActor in
                 self?.pause()
             }
             return .success
@@ -435,7 +437,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         // Toggle play/pause
         commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote TOGGLE play/pause command received")
+            Task { @MainActor in
                 self?.togglePlayPause()
             }
             return .success
@@ -444,7 +447,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         // Next track
         commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote NEXT TRACK command received")
+            Task { @MainActor in
                 self?.nextTrack()
             }
             return .success
@@ -453,7 +457,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         // Previous track
         commandCenter.previousTrackCommand.isEnabled = true
         commandCenter.previousTrackCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote PREVIOUS TRACK command received")
+            Task { @MainActor in
                 self?.previousTrack()
             }
             return .success
@@ -465,7 +470,8 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             guard let positionEvent = event as? MPChangePlaybackPositionCommandEvent else {
                 return .commandFailed
             }
-            DispatchQueue.main.async {
+            print("[MediaPlaybackService] 🎮 Remote SEEK command received: \(positionEvent.positionTime)")
+            Task { @MainActor in
                 self?.seek(to: positionEvent.positionTime)
             }
             return .success
@@ -762,14 +768,14 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
 
     /// Load and play from a MediaItem
     public func loadAndPlay(mediaItem: any MediaItem, info: NowPlayingInfo? = nil) async {
-        var url: URL?
+        // For audio, use the shared audio player
         if mediaItem.type == .audio {
-            url = await mediaItem.loadAudioURL()
-        } else if mediaItem.type == .video {
-            url = await mediaItem.loadVideoURL()
+            await loadAudioInSharedPlayer(mediaItem: mediaItem, autoplay: true)
+            return
         }
 
-        guard let url = url else {
+        // For video, use the legacy player
+        guard let url = await mediaItem.loadVideoURL() else {
             playbackState = .failed("Could not load media URL")
             return
         }
@@ -779,17 +785,15 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         if playingInfo == nil {
             let metadata = await mediaItem.getAudioMetadata()
             let artwork = await mediaItem.loadImage()
-            let audioDuration = await mediaItem.getAudioDuration()
             let videoDuration = await mediaItem.getVideoDuration()
-            let mediaDuration = audioDuration ?? videoDuration
 
             playingInfo = NowPlayingInfo(
                 title: metadata?.title,
                 artist: metadata?.artist,
                 album: metadata?.album,
                 artwork: artwork,
-                duration: mediaDuration,
-                isVideo: mediaItem.type == .video
+                duration: videoDuration,
+                isVideo: true
             )
         }
 
@@ -1397,6 +1401,18 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
     /// Load and play an audio item using the shared audio player
     /// This is the primary method for audio playback - uses a single reusable player
     public func loadAudioInSharedPlayer(mediaItem: any MediaItem, autoplay: Bool = true) async {
+        // Check if this item is already loaded in the shared player
+        if let currentItem = currentAudioMediaItem, currentItem.id == mediaItem.id {
+            print("[MediaPlaybackService] ♻️ Audio already in shared player (id: \(mediaItem.id)), skipping reload")
+            // Just handle autoplay state
+            if autoplay && sharedAudioPlayer?.rate == 0 {
+                sharedAudioPlayer?.play()
+                isPlaying = true
+                playbackState = .playing
+            }
+            return
+        }
+
         // Get URL - prefer cached, fall back to source
         var audioURL: URL?
 
