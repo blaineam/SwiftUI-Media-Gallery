@@ -2019,8 +2019,19 @@ struct ZoomableMediaView: View {
 
             // Check if the shared audio player is already playing this item
             // This prevents double-loading when the view is recreated on foreground restore
+            // Use content-based comparison (diskCacheKey/sourceURL) instead of UUID
+            // because gallery recreation creates new media items with new UUIDs for the same file
             let sharedPlayerAlreadyHasThisItem = await MainActor.run {
                 if let currentItem = MediaPlaybackService.shared.currentAudioMediaItem {
+                    // Compare by content, not UUID - diskCacheKey is most reliable
+                    if let key1 = currentItem.diskCacheKey, let key2 = mediaItem.diskCacheKey {
+                        return key1 == key2
+                    }
+                    // Fall back to sourceURL comparison
+                    if let url1 = currentItem.sourceURL, let url2 = mediaItem.sourceURL {
+                        return url1.absoluteString == url2.absoluteString
+                    }
+                    // Last resort: compare by UUID
                     return currentItem.id == mediaItem.id
                 }
                 return false
@@ -2030,12 +2041,14 @@ struct ZoomableMediaView: View {
             if isCurrentSlide {
                 if sharedPlayerAlreadyHasThisItem {
                     // Already loaded - just reference the player, don't reload
-                    print("[ZoomableMediaView] ♻️ Shared player already has this item, reusing")
+                    print("[ZoomableMediaView] ♻️ Shared player already has this item (same content), reusing")
                     await MainActor.run {
                         audioPlayer = MediaPlaybackService.shared.sharedAudioPlayer
                     }
                 } else {
                     // Load fresh into shared player
+                    // MediaPlaybackService.loadAudioInSharedPlayer has its own content-based check
+                    // that will skip reload if the same content is already loaded
                     await MediaPlaybackService.shared.loadAudioInSharedPlayer(
                         mediaItem: mediaItem,
                         autoplay: isSlideshowPlaying

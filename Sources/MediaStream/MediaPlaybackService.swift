@@ -165,6 +165,7 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
     public private(set) var sharedAudioPlayer: AVPlayer?
     private var sharedAudioTimeObserver: Any?
     private var sharedAudioItemObserver: NSKeyValueObservation?
+    private var sharedAudioEndObserver: NSObjectProtocol?
 
     /// The currently loaded media item in the shared audio player
     @Published public private(set) var currentAudioMediaItem: (any MediaItem)?
@@ -609,6 +610,15 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             let wasInBackground = isInBackground
             isInBackground = false
             backgroundMediaType = nil
+
+            // Reactivate audio session when entering foreground
+            // iOS may have deactivated it during background
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                print("[MediaPlaybackService] Reactivated audio session for foreground")
+            } catch {
+                print("[MediaPlaybackService] Failed to reactivate audio session: \(error)")
+            }
 
             // Auto-stop PiP when returning to foreground
             if wasInBackground && isPiPActive {
@@ -1405,18 +1415,49 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
 
     // MARK: - Shared Audio Player Management
 
+    /// Helper to check if two media items represent the same content
+    /// Uses diskCacheKey (most reliable) or sourceURL to compare, ignoring UUID
+    private func isSameMediaContent(_ item1: any MediaItem, _ item2: any MediaItem) -> Bool {
+        // First try diskCacheKey (most reliable - includes path and modification date)
+        if let key1 = item1.diskCacheKey, let key2 = item2.diskCacheKey {
+            return key1 == key2
+        }
+        // Fall back to sourceURL comparison
+        if let url1 = item1.sourceURL, let url2 = item2.sourceURL {
+            return url1.absoluteString == url2.absoluteString
+        }
+        // Last resort: compare by UUID (least reliable after view recreation)
+        return item1.id == item2.id
+    }
+
     /// Load and play an audio item using the shared audio player
     /// This is the primary method for audio playback - uses a single reusable player
-    public func loadAudioInSharedPlayer(mediaItem: any MediaItem, autoplay: Bool = true) async {
+    /// - Parameters:
+    ///   - mediaItem: The media item to play
+    ///   - autoplay: Whether to start playing immediately
+    ///   - seekToPosition: If provided, seeks to this position after loading (for restoration)
+    public func loadAudioInSharedPlayer(mediaItem: any MediaItem, autoplay: Bool = true, seekToPosition: TimeInterval? = nil) async {
         // Check if this item is already loaded in the shared player
-        if let currentItem = currentAudioMediaItem, currentItem.id == mediaItem.id {
-            print("[MediaPlaybackService] ♻️ Audio already in shared player (id: \(mediaItem.id)), skipping reload")
+        // Use content-based comparison (diskCacheKey/sourceURL) instead of UUID
+        // because gallery recreation creates new media items with new UUIDs for the same file
+        if let currentItem = currentAudioMediaItem, isSameMediaContent(currentItem, mediaItem) {
+            print("[MediaPlaybackService] ♻️ Audio already in shared player (same content), skipping reload")
+
+            // Handle seek position restoration if requested
+            if let position = seekToPosition, position > 0 {
+                let cmTime = CMTime(seconds: position, preferredTimescale: 600)
+                await sharedAudioPlayer?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                currentTime = position
+                print("[MediaPlaybackService] 🔄 Restored playback position to \(position)")
+            }
+
             // Just handle autoplay state
             if autoplay && sharedAudioPlayer?.rate == 0 {
                 sharedAudioPlayer?.play()
                 isPlaying = true
                 playbackState = .playing
             }
+            updateNowPlayingInfo()
             return
         }
 
@@ -1459,6 +1500,9 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             isUsingSharedAudioPlayer = true
             externalPlayer = sharedAudioPlayer  // Keep compatibility
 
+            // Setup end-of-track observer for this specific item
+            setupItemEndObserver(for: newItem)
+
             if autoplay {
                 sharedAudioPlayer?.play()
                 isPlaying = true
@@ -1466,6 +1510,14 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             }
 
             print("[MediaPlaybackService] Loaded audio in shared player: \(url.lastPathComponent)")
+        }
+
+        // Seek to position if requested (for restoration) - must be outside MainActor.run for async seek
+        if let position = seekToPosition, position > 0 {
+            let cmTime = CMTime(seconds: position, preferredTimescale: 600)
+            await sharedAudioPlayer?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            currentTime = position
+            print("[MediaPlaybackService] 🔄 Set initial playback position to \(position)")
         }
 
         // Load and update metadata
@@ -1504,11 +1556,11 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
         }
     }
 
-    /// Setup observers for the shared audio player
+    /// Setup observers for the shared audio player (called once when player is created)
     private func setupSharedAudioPlayerObservers() {
         guard let player = sharedAudioPlayer else { return }
 
-        // Remove existing observer
+        // Remove existing time observer
         if let observer = sharedAudioTimeObserver {
             player.removeTimeObserver(observer)
             sharedAudioTimeObserver = nil
@@ -1539,29 +1591,37 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             }
         }
 
-        // Observe item end
-        sharedAudioItemObserver = player.observe(\.currentItem?.status) { [weak self] player, _ in
-            if player.currentItem?.status == .readyToPlay {
+        // Observe item status changes
+        sharedAudioItemObserver = player.observe(\.currentItem?.status) { [weak self] observedPlayer, _ in
+            guard self != nil else { return }
+            if observedPlayer.currentItem?.status == .readyToPlay {
                 print("[MediaPlaybackService] Shared audio player ready to play")
             }
         }
+    }
 
-        // Handle playback completion
-        NotificationCenter.default.addObserver(
+    /// Setup end-of-track observer for the current player item
+    /// Called each time a new item is loaded to ensure we catch completion
+    private func setupItemEndObserver(for playerItem: AVPlayerItem) {
+        // Remove existing end observer
+        if let observer = sharedAudioEndObserver {
+            NotificationCenter.default.removeObserver(observer)
+            sharedAudioEndObserver = nil
+        }
+
+        // Register for this specific item's end notification
+        sharedAudioEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
+            object: playerItem,  // Only listen for THIS item
+            queue: nil  // Use posting queue for immediate delivery (important for background)
+        ) { [weak self] _ in
             Task { @MainActor in
-                guard let self = self,
-                      self.isUsingSharedAudioPlayer,
-                      let item = notification.object as? AVPlayerItem,
-                      item == self.sharedAudioPlayer?.currentItem else { return }
-
-                print("[MediaPlaybackService] Shared audio player finished track")
+                guard let self = self, self.isUsingSharedAudioPlayer else { return }
+                print("[MediaPlaybackService] 🎵 Shared audio player finished track - advancing to next")
                 self.handleTrackCompletion()
             }
         }
+        print("[MediaPlaybackService] Registered end observer for player item")
     }
 
     /// Handle when the current track finishes playing
