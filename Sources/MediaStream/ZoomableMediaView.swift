@@ -1555,6 +1555,7 @@ struct ZoomableMediaView: View {
             } else if mediaItem.type == .audio {
                 if newValue && !oldValue {
                     // When this slide becomes current, load audio if not already loaded
+                    // Don't check isCurrentSlide again - if we got here, slide WAS current at some point
                     if audioPlayer == nil {
                         Task {
                             // Check if the shared audio player is already playing this item
@@ -1579,7 +1580,8 @@ struct ZoomableMediaView: View {
                                     audioPlayer = MediaPlaybackService.shared.sharedAudioPlayer
                                 }
                             } else {
-                                // Load fresh into shared player
+                                // Load fresh into shared player - don't check isCurrentSlide again to avoid race condition
+                                print("[ZoomableMediaView] 🎵 Loading audio (onChange handler)")
                                 await MediaPlaybackService.shared.loadAudioInSharedPlayer(
                                     mediaItem: mediaItem,
                                     autoplay: false  // Don't autoplay when manually navigating
