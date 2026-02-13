@@ -1492,8 +1492,17 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
                 print("[MediaPlaybackService] Created shared audio player")
             }
 
-            // Replace the current item
-            let newItem = AVPlayerItem(url: url)
+            // Replace the current item - create AVURLAsset with auth headers for remote files
+            let asset: AVURLAsset
+            if let headers = await MediaStreamConfiguration.headersAsync(for: url), !headers.isEmpty {
+                // Remote file requiring authentication
+                asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+                print("[MediaPlaybackService] Loading audio with auth headers")
+            } else {
+                // Local cached file or no auth needed
+                asset = AVURLAsset(url: url)
+            }
+            let newItem = AVPlayerItem(asset: asset)
             sharedAudioPlayer?.replaceCurrentItem(with: newItem)
             currentAudioMediaItem = mediaItem
             isUsingSharedAudioPlayer = true
