@@ -96,18 +96,6 @@ public struct VRVideoPlayerView: View {
                     onPlayPause: {
                         togglePlayPause()
                     },
-                    onMenu: {
-                        if showProjectionPicker {
-                            withAnimation { showProjectionPicker = false }
-                            return true
-                        } else if showControls {
-                            withAnimation { showControls = false }
-                            return true
-                        } else {
-                            // Nothing to dismiss — let press pass through for system back navigation
-                            return false
-                        }
-                    },
                     controlsVisible: showControls || showProjectionPicker
                 )
                 .ignoresSafeArea()
@@ -116,18 +104,48 @@ public struct VRVideoPlayerView: View {
                     .scaleEffect(1.5)
             }
 
-            // Controls overlay — always in the view tree on tvOS so focus
-            // engine can discover the buttons; hidden via opacity when not visible.
             #if os(tvOS)
-            controlsOverlay
-                .opacity(showControls ? 1 : 0)
-                .allowsHitTesting(showControls)
-                .focusSection()
+            // tvOS focus-based press handling. TVSCNView is never focusable — it only
+            // handles pan gestures for look-around. All press events go through SwiftUI.
+
+            // When controls are hidden: invisible button captures Select press to show controls.
+            // No .onExitCommand here so Menu passes through to system back navigation.
+            if !showControls && !showProjectionPicker {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showControls = true
+                    }
+                    resetControlsTimer()
+                } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            // When controls are visible: show overlay with focusable buttons.
+            // .onExitCommand hides controls.
+            if showControls {
+                controlsOverlay
+                    .transition(.opacity)
+                    .focusSection()
+                    .onExitCommand {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            showControls = false
+                        }
+                    }
+            }
 
             if showProjectionPicker {
                 projectionPickerOverlay
                     .transition(.opacity)
                     .focusSection()
+                    .onExitCommand {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showProjectionPicker = false
+                        }
+                    }
             }
             #else
             if showControls {
@@ -162,19 +180,9 @@ public struct VRVideoPlayerView: View {
             }
         }
         #if os(tvOS)
-        // These SwiftUI modifiers work when the controls overlay has focus
-        // (TVSCNView yields focus when controls are visible). When TVSCNView
-        // has focus, it handles presses directly via callbacks.
+        // Play/pause works at any time — no UIKit view intercepts it now
         .onPlayPauseCommand {
             togglePlayPause()
-        }
-        .onExitCommand {
-            if showProjectionPicker {
-                withAnimation { showProjectionPicker = false }
-            } else if showControls {
-                withAnimation { showControls = false }
-            }
-            // When controls are hidden, TVSCNView has focus and handles Menu directly
         }
         #endif
     }

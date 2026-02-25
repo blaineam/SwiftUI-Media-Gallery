@@ -175,70 +175,13 @@ public class VRSceneCoordinator: NSObject, SCNSceneRendererDelegate {
 #if canImport(UIKit)
 
 #if os(tvOS)
-/// Focusable SCNView for tvOS that handles Siri Remote press events directly.
-/// All important presses (select, playPause, menu) are handled via callbacks —
-/// they are NEVER passed to super (SCNView swallows them and they don't propagate
-/// to SwiftUI's .onExitCommand / .onPlayPauseCommand).
-/// When `controlsAreVisible` is true, this view refuses focus so the SwiftUI
-/// controls overlay can receive it instead.
+/// Pure rendering surface for tvOS — never focusable, no press handling.
+/// Press events (select, menu, play/pause) are handled at the SwiftUI level
+/// via overlays in VRVideoPlayerView. Gesture recognizers (pan for look-around)
+/// work without focus and are attached in makeUIView.
 private class TVSCNView: SCNView {
-    /// Set by updateUIView to toggle focusability when controls show/hide
-    var controlsAreVisible: Bool = false {
-        didSet {
-            if controlsAreVisible != oldValue {
-                setNeedsFocusUpdate()
-                updateFocusIfNeeded()
-            }
-        }
-    }
-
-    override var canBecomeFocused: Bool { !controlsAreVisible }
-
-    var onSelectPress: (() -> Void)?
-    var onPlayPausePress: (() -> Void)?
-    /// Returns true if handled (controls/picker dismissed), false to pass through to system navigation
-    var onMenuPress: (() -> Bool)?
-
-    /// Tracks whether the last menu pressesBegan was consumed (so pressesEnded matches)
-    private var menuPressHandled = false
-
-    // Suppress default tvOS focus appearance (no focus ring on the VR viewport)
+    override var canBecomeFocused: Bool { false }
     override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {}
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var unhandled = [UIPress]()
-        for press in presses {
-            switch press.type {
-            case .select:
-                onSelectPress?()
-            case .playPause:
-                onPlayPausePress?()
-            case .menu:
-                menuPressHandled = onMenuPress?() ?? false
-                if !menuPressHandled {
-                    unhandled.append(press)
-                }
-            default:
-                unhandled.append(press)
-            }
-        }
-        if !unhandled.isEmpty {
-            super.pressesBegan(Set(unhandled), with: event)
-        }
-    }
-
-    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        let passThrough = presses.filter { press in
-            switch press.type {
-            case .select, .playPause: return false
-            case .menu: return !menuPressHandled // Pass through if we didn't handle it
-            default: return true
-            }
-        }
-        if !passThrough.isEmpty {
-            super.pressesEnded(Set(passThrough), with: event)
-        }
-    }
 }
 #endif
 
@@ -254,14 +197,11 @@ public struct VRVideoView: UIViewRepresentable {
     @Binding var gyroEnabled: Bool
     @Binding var fieldOfView: Double
 
-    /// Called when the user taps/clicks the VR view (e.g. trackpad click on tvOS)
+    /// Called when the user taps/clicks the VR view (iOS single-tap / macOS click)
     var onTap: (() -> Void)?
-    /// Called when the user presses play/pause (tvOS Siri Remote)
+    /// Called when the user presses play/pause (iOS/macOS keyboard shortcut)
     var onPlayPause: (() -> Void)?
-    /// Called when the user presses Menu/Back (tvOS). Returns true if handled
-    /// (controls/picker dismissed), false to pass through for system back navigation.
-    var onMenu: (() -> Bool)?
-    /// When true, pan gesture is disabled so tvOS focus navigation works on controls
+    /// When true, pan gesture is disabled (tvOS: so trackpad swipes navigate focus)
     var controlsVisible: Bool = false
 
     public init(player: AVPlayer, projection: VRProjection,
@@ -270,7 +210,6 @@ public struct VRVideoView: UIViewRepresentable {
                 gyroEnabled: Binding<Bool>, fieldOfView: Binding<Double>,
                 onTap: (() -> Void)? = nil,
                 onPlayPause: (() -> Void)? = nil,
-                onMenu: (() -> Bool)? = nil,
                 controlsVisible: Bool = false) {
         self.player = player
         self.projection = projection
@@ -282,7 +221,6 @@ public struct VRVideoView: UIViewRepresentable {
         self._fieldOfView = fieldOfView
         self.onTap = onTap
         self.onPlayPause = onPlayPause
-        self.onMenu = onMenu
         self.controlsVisible = controlsVisible
     }
 
@@ -326,11 +264,8 @@ public struct VRVideoView: UIViewRepresentable {
         panGesture.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirect.rawValue)]
         scnView.addGestureRecognizer(panGesture)
         coordinator.panGesture = panGesture
-
-        // Wire press callbacks — select toggles controls, playPause toggles playback.
-        // When onTap is nil (externally controlled), select passes through to SwiftUI tap gesture.
-        // Menu/arrows always pass through to SwiftUI's .onExitCommand / .onMoveCommand.
-        coordinator.setupTVCallbacks(scnView: scnView)
+        // Press events (select, menu, play/pause) are handled at the SwiftUI level
+        // in VRVideoPlayerView — TVSCNView is a pure rendering surface.
         #endif
 
         return scnView
@@ -358,14 +293,9 @@ public struct VRVideoView: UIViewRepresentable {
         coordinator.sceneCoordinator.fieldOfView = fieldOfView
 
         #if os(tvOS)
-        // Disable pan gesture when controls are visible so swipes navigate between buttons
+        // Disable pan gesture when controls are visible so trackpad swipes
+        // navigate focus between buttons instead of rotating the camera
         coordinator.panGesture?.isEnabled = !controlsVisible
-        // Toggle TVSCNView focusability so focus moves to the controls overlay
-        if let tvView = scnView as? TVSCNView {
-            tvView.controlsAreVisible = controlsVisible
-            // Update press callbacks — onTap may change between nil/non-nil
-            coordinator.setupTVCallbacks(scnView: tvView)
-        }
         #endif
     }
 
@@ -385,24 +315,6 @@ public struct VRVideoView: UIViewRepresentable {
             self.parent = parent
             super.init()
         }
-
-        #if os(tvOS)
-        /// Wires TVSCNView press callbacks. Select and playPause are always consumed.
-        /// Menu returns true if handled (controls/picker dismissed) or false to pass through
-        /// to the system responder chain for back navigation.
-        func setupTVCallbacks(scnView: SCNView) {
-            guard let tvView = scnView as? TVSCNView else { return }
-            tvView.onSelectPress = { [weak self] in
-                self?.parent?.onTap?()
-            }
-            tvView.onPlayPausePress = { [weak self] in
-                self?.parent?.onPlayPause?()
-            }
-            tvView.onMenuPress = { [weak self] () -> Bool in
-                return self?.parent?.onMenu?() ?? false
-            }
-        }
-        #endif
 
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
             guard let view = gesture.view else { return }
@@ -493,7 +405,6 @@ public struct VRVideoView: NSViewRepresentable {
 
     var onTap: (() -> Void)?
     var onPlayPause: (() -> Void)?
-    var onMenu: (() -> Bool)?
     var controlsVisible: Bool = false
 
     public init(player: AVPlayer, projection: VRProjection,
@@ -502,7 +413,6 @@ public struct VRVideoView: NSViewRepresentable {
                 gyroEnabled: Binding<Bool>, fieldOfView: Binding<Double>,
                 onTap: (() -> Void)? = nil,
                 onPlayPause: (() -> Void)? = nil,
-                onMenu: (() -> Bool)? = nil,
                 controlsVisible: Bool = false) {
         self.player = player
         self.projection = projection
@@ -514,7 +424,6 @@ public struct VRVideoView: NSViewRepresentable {
         self._fieldOfView = fieldOfView
         self.onTap = onTap
         self.onPlayPause = onPlayPause
-        self.onMenu = onMenu
         self.controlsVisible = controlsVisible
     }
 
