@@ -681,18 +681,6 @@ struct VRScrubBar: View {
     }
 }
 
-/// Conditional view modifier — only applies the transform when condition is true
-private extension View {
-    @ViewBuilder
-    func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
-        if condition {
-            transform(self)
-        } else {
-            self
-        }
-    }
-}
-
 // MARK: - tvOS Focus Capture View
 
 /// UIViewRepresentable that captures Select press without any visual focus effect.
@@ -717,14 +705,9 @@ struct TVFocusCaptureView: UIViewRepresentable {
 
         override var canBecomeFocused: Bool { true }
 
-        // Suppress ALL system focus effects (white haze, parallax, etc.)
-        override var focusEffect: UIFocusEffect? {
-            get { nil }
-            set {}
-        }
-
         override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
-            // No visual change on focus
+            // No visual change on focus — plain UIView with clear background
+            // doesn't get the system focus highlight (that's only on UIButton/UIImageView)
         }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
