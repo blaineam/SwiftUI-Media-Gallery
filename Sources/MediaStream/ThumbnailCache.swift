@@ -737,8 +737,8 @@ extension ThumbnailCache {
             return webViewThumbnail
         }
 
-        // Return a placeholder if both fail
-        return createVideoPlaceholder(targetSize: targetSize)
+        // Return nil — callers handle their own fallback UI
+        return nil
     }
 
     /// Generate a thumbnail using AVFoundation (fallback)
@@ -943,7 +943,7 @@ extension ThumbnailCache {
 
             return createThumbnail(from: fullImage, targetSize: targetSize)
         } catch {
-            return createVideoPlaceholder(targetSize: targetSize)
+            return nil
         }
     }
 }

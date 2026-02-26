@@ -921,6 +921,7 @@ struct LazyThumbnailView: View {
     var onTypeResolved: ((UUID) -> Void)? = nil
 
     @State private var thumbnail: PlatformImage?
+    @State private var isPlaceholder = false
     @State private var isLoading = false
     @State private var hasAppeared = false
     @State private var loadTask: Task<Void, Never>? = nil
@@ -932,16 +933,17 @@ struct LazyThumbnailView: View {
                     if let thumbnail = thumbnail {
                         // Always use static Image for thumbnails (no animation in grid)
                         // Crop SBS thumbnails to left half, TB to top half for clarity
+                        // Skip cropping for placeholder images (e.g. play icon fallback)
                         #if canImport(UIKit)
                         let image = Image(uiImage: thumbnail).resizable()
                         #elseif canImport(AppKit)
                         let image = Image(nsImage: thumbnail).resizable()
                         #endif
-                        if mediaItem.vrProjection?.isSBS == true {
+                        if !isPlaceholder && mediaItem.vrProjection?.isSBS == true {
                             image.scaledToFill()
                                 .frame(width: geometry.size.width * 2, height: geometry.size.width)
                                 .frame(width: geometry.size.width, height: geometry.size.width, alignment: .leading)
-                        } else if mediaItem.vrProjection?.isTB == true {
+                        } else if !isPlaceholder && mediaItem.vrProjection?.isTB == true {
                             image.scaledToFill()
                                 .frame(width: geometry.size.width, height: geometry.size.width * 2)
                                 .frame(width: geometry.size.width, height: geometry.size.width, alignment: .top)
@@ -954,6 +956,8 @@ struct LazyThumbnailView: View {
                     } else if mediaItem.type == .audio {
                         // Show music note placeholder for audio files without artwork
                         audioPlaceholderView
+                    } else if mediaItem.type == .video {
+                        videoPlaceholderView
                     } else {
                         Color.gray.opacity(0.3)
                     }
@@ -1094,7 +1098,9 @@ struct LazyThumbnailView: View {
                 var thumb = await mediaItem.loadThumbnail(targetSize: ThumbnailCache.thumbnailSize)
 
                 // If no thumbnail loaded, use fallback placeholder for audio/video
+                var isFallback = false
                 if thumb == nil {
+                    isFallback = true
                     switch mediaItem.type {
                     case .audio:
                         thumb = ThumbnailCache.createAudioPlaceholder(targetSize: ThumbnailCache.thumbnailSize)
@@ -1112,11 +1118,14 @@ struct LazyThumbnailView: View {
                 }
 
                 if let thumb = thumb {
-                    // Cache it (both memory and disk if key available, skip disk for animated)
-                    ThumbnailCache.shared.set(mediaItem.id, image: thumb, diskCacheKey: diskCacheKey)
+                    // Cache real thumbnails (skip caching placeholders — they regenerate instantly)
+                    if !isFallback {
+                        ThumbnailCache.shared.set(mediaItem.id, image: thumb, diskCacheKey: diskCacheKey)
+                    }
 
                     await MainActor.run {
                         self.thumbnail = thumb
+                        self.isPlaceholder = isFallback
                         self.isLoading = false
                         // If type changed (e.g., webp/heic resolved from .image → .animatedImage),
                         // notify the parent grid to re-check media types and re-filter.
@@ -1144,6 +1153,15 @@ struct LazyThumbnailView: View {
         ZStack {
             Color.gray.opacity(0.3)
             Image(systemName: "music.note")
+                .font(.system(size: 40))
+                .foregroundColor(.gray)
+        }
+    }
+
+    private var videoPlaceholderView: some View {
+        ZStack {
+            Color.gray.opacity(0.3)
+            Image(systemName: "play.circle.fill")
                 .font(.system(size: 40))
                 .foregroundColor(.gray)
         }
