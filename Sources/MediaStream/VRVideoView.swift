@@ -79,6 +79,9 @@ public class VRSceneCoordinator: NSObject, SCNSceneRendererDelegate {
 
         sphereNode = SCNNode(geometry: geometry)
         sphereNode.position = SCNVector3(0, 0, 0)
+        // Flip X scale to unmirror the texture — when viewing a sphere from the inside
+        // (cullMode = .front), the texture wraps in reverse and appears horizontally mirrored.
+        sphereNode.scale = SCNVector3(-1, 1, 1)
 
         // Rotate sphere for 180° projections so the front hemisphere faces the camera
         if projection == .equirectangular180 || projection == .sbs180 || projection == .tb180 {
@@ -96,14 +99,30 @@ public class VRSceneCoordinator: NSObject, SCNSceneRendererDelegate {
         guard let material = sphereNode.geometry?.firstMaterial else { return }
 
         switch projection {
-        case .stereoscopicSBS, .sbs180:
-            // Left eye (left half)
+        case .stereoscopicSBS, .sbs180, .sbs:
+            // Left eye (left half) — crop to 50% width, no horizontal stretch
             material.diffuse.contentsTransform = SCNMatrix4MakeScale(0.5, 1.0, 1.0)
             material.diffuse.wrapS = .clamp
             material.diffuse.wrapT = .clamp
 
-        case .stereoscopicTB, .tb180:
+        case .hsbs:
+            // Half-width SBS: left half stretched to full aspect ratio.
+            // The source is already half-width (squeezed), so cropping to the left 50%
+            // and letting SceneKit's texture mapping stretch it restores the correct AR.
+            material.diffuse.contentsTransform = SCNMatrix4MakeScale(0.5, 1.0, 1.0)
+            material.diffuse.wrapS = .clamp
+            material.diffuse.wrapT = .clamp
+
+        case .stereoscopicTB, .tb180, .tb:
             // Top eye (top half)
+            material.diffuse.contentsTransform = SCNMatrix4MakeScale(1.0, 0.5, 1.0)
+            material.diffuse.wrapS = .clamp
+            material.diffuse.wrapT = .clamp
+
+        case .htb:
+            // Half-height TB: top half stretched to full aspect ratio.
+            // The source is already half-height (squeezed), so cropping to the top 50%
+            // and letting SceneKit's texture mapping stretch it restores the correct AR.
             material.diffuse.contentsTransform = SCNMatrix4MakeScale(1.0, 0.5, 1.0)
             material.diffuse.wrapS = .clamp
             material.diffuse.wrapT = .clamp
@@ -249,6 +268,7 @@ public struct VRVideoView: UIViewRepresentable {
         #if os(iOS)
         let panGesture = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))
         scnView.addGestureRecognizer(panGesture)
+        coordinator.panGesture = panGesture
 
         let pinchGesture = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
         scnView.addGestureRecognizer(pinchGesture)
@@ -292,13 +312,20 @@ public struct VRVideoView: UIViewRepresentable {
             coordinator.sceneCoordinator.updateProjection(projection)
         }
 
-        // Sync state to coordinator (read by render delegate on render thread)
-        coordinator.sceneCoordinator.manualYaw = manualYaw
-        coordinator.sceneCoordinator.manualPitch = manualPitch
+        // Sync state to coordinator (read by render delegate on render thread).
+        // Only overwrite manual yaw/pitch/FOV if a gesture is NOT in progress —
+        // the pan gesture updates the coordinator directly at input frequency,
+        // and updateUIView would overwrite those with stale @State values
+        // (only synced on gesture end), causing the view to snap back.
+        let gestureActive = coordinator.panGesture?.state == .changed || coordinator.panGesture?.state == .began
+        if !gestureActive {
+            coordinator.sceneCoordinator.manualYaw = manualYaw
+            coordinator.sceneCoordinator.manualPitch = manualPitch
+            coordinator.sceneCoordinator.fieldOfView = fieldOfView
+        }
         coordinator.sceneCoordinator.gyroYaw = gyroYaw
         coordinator.sceneCoordinator.gyroPitch = gyroPitch
         coordinator.sceneCoordinator.gyroEnabled = gyroEnabled
-        coordinator.sceneCoordinator.fieldOfView = fieldOfView
 
         #if os(tvOS)
         // Disable pan gesture when controls are visible so trackpad swipes
@@ -314,9 +341,7 @@ public struct VRVideoView: UIViewRepresentable {
     public class Coordinator: NSObject {
         let sceneCoordinator: VRSceneCoordinator
         var parent: VRVideoView?
-        #if os(tvOS)
         weak var panGesture: UIPanGestureRecognizer?
-        #endif
 
         init(player: AVPlayer, projection: VRProjection, parent: VRVideoView) {
             self.sceneCoordinator = VRSceneCoordinator(player: player, projection: projection)
@@ -335,14 +360,14 @@ public struct VRVideoView: UIViewRepresentable {
             #endif
 
             // Update coordinator directly (picked up by render delegate on render thread)
-            // Yaw: swipe right → look right (negative yaw rotates view right)
-            sceneCoordinator.manualYaw -= Float(translation.x) * sensitivity
             #if os(tvOS)
-            // tvOS Siri Remote: swipe up = positive Y, should look up (positive pitch)
-            sceneCoordinator.manualPitch += Float(translation.y) * sensitivity
-            #else
-            // iOS touch: drag up = negative Y, should look up (positive pitch)
+            // tvOS Siri Remote: swipe right → look right (negative yaw), swipe up → look up
+            sceneCoordinator.manualYaw -= Float(translation.x) * sensitivity
             sceneCoordinator.manualPitch -= Float(translation.y) * sensitivity
+            #else
+            // iOS touch: drag right → look right (positive yaw), drag up (negative Y) → look up
+            sceneCoordinator.manualYaw += Float(translation.x) * sensitivity
+            sceneCoordinator.manualPitch += Float(translation.y) * sensitivity
             #endif
             sceneCoordinator.manualPitch = max(-.pi / 2 + 0.1, min(.pi / 2 - 0.1, sceneCoordinator.manualPitch))
 
@@ -454,6 +479,7 @@ public struct VRVideoView: NSViewRepresentable {
         // Pan gesture for drag-to-look
         let panGesture = NSPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))
         scnView.addGestureRecognizer(panGesture)
+        coordinator.panGesture = panGesture
 
         // Magnification gesture for FOV zoom
         let magnifyGesture = NSMagnificationGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleMagnify(_:)))
@@ -483,13 +509,20 @@ public struct VRVideoView: NSViewRepresentable {
             coordinator.sceneCoordinator.updateProjection(projection)
         }
 
-        // Sync state to coordinator (read by render delegate on render thread)
-        coordinator.sceneCoordinator.manualYaw = manualYaw
-        coordinator.sceneCoordinator.manualPitch = manualPitch
+        // Sync state to coordinator (read by render delegate on render thread).
+        // Only overwrite manual yaw/pitch/FOV if a gesture is NOT in progress —
+        // the pan gesture updates the coordinator directly at input frequency,
+        // and updateNSView would overwrite those with stale @State values
+        // (only synced on gesture end), causing the view to snap back.
+        let gestureActive = coordinator.panGesture?.state == .changed || coordinator.panGesture?.state == .began
+        if !gestureActive {
+            coordinator.sceneCoordinator.manualYaw = manualYaw
+            coordinator.sceneCoordinator.manualPitch = manualPitch
+            coordinator.sceneCoordinator.fieldOfView = fieldOfView
+        }
         coordinator.sceneCoordinator.gyroYaw = gyroYaw
         coordinator.sceneCoordinator.gyroPitch = gyroPitch
         coordinator.sceneCoordinator.gyroEnabled = gyroEnabled
-        coordinator.sceneCoordinator.fieldOfView = fieldOfView
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -500,6 +533,7 @@ public struct VRVideoView: NSViewRepresentable {
         let sceneCoordinator: VRSceneCoordinator
         var parent: VRVideoView?
         weak var scnView: SCNView?
+        weak var panGesture: NSPanGestureRecognizer?
 
         init(player: AVPlayer, projection: VRProjection, parent: VRVideoView) {
             self.sceneCoordinator = VRSceneCoordinator(player: player, projection: projection)

@@ -369,7 +369,7 @@ public final class DiskThumbnailCache: @unchecked Sendable {
 
 /// Actor to limit concurrent thumbnail loading operations
 public actor ThumbnailLoadingQueue {
-    public static let shared = ThumbnailLoadingQueue(maxConcurrent: 4)
+    public static let shared = ThumbnailLoadingQueue(maxConcurrent: 8)
 
     private let maxConcurrent: Int
     private var currentCount: Int = 0

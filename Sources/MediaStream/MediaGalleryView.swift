@@ -107,10 +107,19 @@ public struct MediaGalleryView: View {
     @State private var isSlideshowPlaying = false
     @State private var isZoomed = false
 
-    /// Whether the current item is a VR video (disables swipe navigation so drag controls the VR camera)
-    private var isCurrentItemVR: Bool {
+    /// Whether the current item is using a VR sphere projection (disables swipe navigation so drag controls the VR camera).
+    /// Flat crop projections (SBS/TB/HSBS/HTB) are NOT sphere-based — swipe navigation stays enabled.
+    private var isCurrentItemVRSphere: Bool {
         guard currentIndex >= 0 && currentIndex < mediaItems.count else { return false }
-        return mediaItems[currentIndex].vrProjection != nil || vrProjectionOverrides[currentIndex] != nil
+        let proj = effectiveVRProjection(for: currentIndex)
+        return proj?.requiresSphere == true
+    }
+
+    /// Whether ANY VR projection is active (sphere or flat crop). Used for 3D button highlighting.
+    private var isCurrentItemVRActive: Bool {
+        guard currentIndex >= 0 && currentIndex < mediaItems.count else { return false }
+        let proj = effectiveVRProjection(for: currentIndex)
+        return proj != nil
     }
 
     /// The effective VR projection for the current item (auto-detected or manual override)
@@ -122,6 +131,7 @@ public struct MediaGalleryView: View {
     @State private var showControls = true
     @State private var shareItem: Any?
     @State private var showShareSheet = false
+    @State private var showFlatProjectionPicker = false
     @State private var currentCaption: String?
     @State private var showCaption = false
     @State private var hideControlsTimer: Timer?
@@ -131,6 +141,7 @@ public struct MediaGalleryView: View {
     @State private var videoLoopCount: Int = 0
     @State private var isFullscreen = false
     @State private var loopMode: LoopMode = .all
+    @State private var autoLoopApplied = false
     @State private var isShuffled = false
     @State private var shuffledIndices: [Int] = []
     @State private var shuffledPosition: Int = 0  // Current position in shuffled order
@@ -222,8 +233,26 @@ public struct MediaGalleryView: View {
                             vrProjectionOverrides[index] = newProjection
                             configuration.onVRProjectionChange?(mediaItems[index], newProjection)
                         },
+                        onVRTapToggleControls: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showControls.toggle()
+                            }
+                            if showControls {
+                                scheduleHideControls()
+                            } else {
+                                cancelHideControls()
+                            }
+                        },
                         onNextItem: { nextItem(); resetControlsTimer() },
-                        onPreviousItem: { previousItem(); resetControlsTimer() }
+                        onPreviousItem: { previousItem(); resetControlsTimer() },
+                        onVRDurationKnown: { dur in
+                            guard !autoLoopApplied, dur > 0, dur < 120 else { return }
+                            autoLoopApplied = true
+                            if loopMode != .one {
+                                loopMode = .one
+                                syncLoopModeToService()
+                            }
+                        }
                     )
                     .opacity(currentIndex == index ? 1 : 0)
                     .zIndex(currentIndex == index ? 1 : 0)
@@ -235,7 +264,7 @@ public struct MediaGalleryView: View {
                         DragGesture(minimumDistance: 100)
                             .onEnded { value in
                                 guard !isZoomed else { return }
-                                guard !isCurrentItemVR else { return }
+                                guard !isCurrentItemVRSphere else { return }
                                 guard !MediaControlsInteractionState.shared.isInteracting else { return }
                                 let horizontalAmount = abs(value.translation.width)
                                 let verticalAmount = abs(value.translation.height)
@@ -269,6 +298,14 @@ public struct MediaGalleryView: View {
                 let cachedItem = cachedItems[newServiceIndex]
                 if let fullIndex = mediaItems.firstIndex(where: { $0.id == cachedItem.id }), fullIndex != currentIndex {
                     currentIndex = fullIndex
+                }
+            }
+            .onChange(of: playbackService.duration) { _, newDuration in
+                guard !autoLoopApplied, newDuration > 0, newDuration < 120 else { return }
+                autoLoopApplied = true
+                if loopMode != .one {
+                    loopMode = .one
+                    syncLoopModeToService()
                 }
             }
             .onChange(of: downloadManager.downloadState) { _, newState in
@@ -317,23 +354,48 @@ public struct MediaGalleryView: View {
 
                             // VR mode toggle for video items
                             if mediaItems[currentIndex].type == .video {
+                                // Projection picker button (when VR active in flat crop mode — sphere has its own picker)
+                                if isCurrentItemVRActive, let proj = effectiveVRProjection(for: currentIndex), !proj.requiresSphere {
+                                    Button {
+                                        showFlatProjectionPicker = true
+                                        resetControlsTimer()
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "view.3d")
+                                                .font(.system(size: 14, weight: .semibold))
+                                            Text(proj.shortLabel)
+                                                .font(.system(size: 12, weight: .medium))
+                                        }
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .mediaStreamGlassCapsule()
+                                }
+
                                 MediaStreamGlassButton(action: {
-                                    if vrProjectionOverrides[currentIndex] != nil {
-                                        // Clear manual override (revert to auto-detected or non-VR)
-                                        vrProjectionOverrides.removeValue(forKey: currentIndex)
-                                        configuration.onVRProjectionChange?(mediaItems[currentIndex], nil)
-                                    } else if mediaItems[currentIndex].vrProjection == nil {
-                                        // Enable VR mode with default 360 projection
+                                    if isCurrentItemVRActive {
+                                        // VR is active (sphere or flat crop) — turn it off
+                                        if mediaItems[currentIndex].vrProjection != nil {
+                                            // Auto-detected as VR — force off with .flat override
+                                            vrProjectionOverrides[currentIndex] = .flat
+                                            configuration.onVRProjectionChange?(mediaItems[currentIndex], .flat)
+                                        } else {
+                                            // Manually enabled — just clear the override
+                                            vrProjectionOverrides.removeValue(forKey: currentIndex)
+                                            configuration.onVRProjectionChange?(mediaItems[currentIndex], nil)
+                                        }
+                                    } else {
+                                        // VR is off — enable with default 360 projection
                                         vrProjectionOverrides[currentIndex] = .equirectangular360
                                         configuration.onVRProjectionChange?(mediaItems[currentIndex], .equirectangular360)
-                                    } else {
-                                        // Already auto-detected as VR, no override needed
                                     }
                                     resetControlsTimer()
                                 }) {
                                     Image(systemName: "view.3d")
                                         .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(isCurrentItemVR ? Color.accentColor : .primary)
+                                        .foregroundStyle(isCurrentItemVRActive ? Color.accentColor : .primary)
                                 }
                             }
 
@@ -376,6 +438,11 @@ public struct MediaGalleryView: View {
                         .padding(.bottom, (mediaItems[currentIndex].type == .video || mediaItems[currentIndex].type == .audio) ? 140 : 20)
                 }
                 .allowsHitTesting(true)
+            }
+
+            // Flat crop projection picker overlay
+            if showFlatProjectionPicker {
+                flatProjectionPickerOverlay
             }
         }
         .contentShape(Rectangle())
@@ -575,6 +642,64 @@ public struct MediaGalleryView: View {
         NotificationCenter.default.removeObserver(self, name: NSNotification.Name("mediaGalleryNextSlide"), object: nil)
     }
     #endif
+
+    /// Projection picker overlay for flat crop VR modes (SBS/TB/HSBS/HTB).
+    /// Mirrors VRVideoPlayerView's projectionPickerOverlay but works outside the sphere renderer.
+    private var flatProjectionPickerOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showFlatProjectionPicker = false
+                    }
+                }
+
+            VStack(spacing: 2) {
+                Text("Projection")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.bottom, 8)
+
+                ForEach(VRProjection.allCases, id: \.self) { proj in
+                    let currentProj = effectiveVRProjection(for: currentIndex) ?? .equirectangular360
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showFlatProjectionPicker = false
+                        }
+                        vrProjectionOverrides[currentIndex] = proj
+                        configuration.onVRProjectionChange?(mediaItems[currentIndex], proj)
+                    } label: {
+                        HStack {
+                            Text(proj.displayName)
+                                .foregroundColor(.white)
+                            Spacer()
+                            if proj == currentProj {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.cyan)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(proj == currentProj ? Color.white.opacity(0.15) : Color.clear)
+                        )
+                    }
+                    #if os(macOS)
+                    .buttonStyle(.plain)
+                    #endif
+                }
+            }
+            .padding(20)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.ultraThinMaterial)
+                    .environment(\.colorScheme, .dark)
+            )
+            .frame(maxWidth: 260)
+        }
+    }
 
     private var controlsView: some View {
         // All controls in one row
@@ -842,6 +967,7 @@ public struct MediaGalleryView: View {
     }
 
     private func handleIndexChanged(_ newIndex: Int) {
+        autoLoopApplied = false
         checkAndHandleVideo()
         loadCaption()
         resetControlsTimer()

@@ -24,7 +24,22 @@ public enum VRProjection: String, CaseIterable, Codable, Sendable {
     case stereoscopicTB       // Top-bottom 3D on full 360 sphere (over-under)
     case sbs180               // Side-by-side 3D on 180 hemisphere (e.g. LR_180, SBS_180)
     case tb180                // Top-bottom 3D on 180 hemisphere (e.g. TB_180, OU_180)
+    case sbs                  // Left eye of SBS content shown as flat 2D (crops left half)
+    case tb                   // Top eye of TB content shown as flat 2D (crops top half)
+    case hsbs                 // Half SBS: half-width left eye stretched to full width, flat 2D
+    case htb                  // Half TB: half-height top eye stretched to full height, flat 2D
     case flat                 // Flat video on virtual curved screen
+
+    /// Whether this projection requires a 3D sphere renderer (SceneKit).
+    /// Flat crop modes (SBS, TB, HSBS, HTB) use the regular AVPlayer with layer cropping.
+    public var requiresSphere: Bool {
+        switch self {
+        case .sbs, .tb, .hsbs, .htb, .flat:
+            return false
+        default:
+            return true
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -34,6 +49,10 @@ public enum VRProjection: String, CaseIterable, Codable, Sendable {
         case .stereoscopicTB: return "3D TB 360\u{00B0}"
         case .sbs180: return "3D SBS 180\u{00B0}"
         case .tb180: return "3D TB 180\u{00B0}"
+        case .sbs: return "SBS"
+        case .tb: return "TB"
+        case .hsbs: return "Half SBS"
+        case .htb: return "Half TB"
         case .flat: return "Flat VR"
         }
     }
@@ -47,6 +66,10 @@ public enum VRProjection: String, CaseIterable, Codable, Sendable {
         case .stereoscopicTB: return "TB"
         case .sbs180: return "SBS 180"
         case .tb180: return "TB 180"
+        case .sbs: return "SBS"
+        case .tb: return "TB"
+        case .hsbs: return "HSBS"
+        case .htb: return "HTB"
         case .flat: return "Flat"
         }
     }

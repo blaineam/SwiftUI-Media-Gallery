@@ -25,9 +25,24 @@ public struct VRVideoPlayerView: View {
     /// External controls visibility (synced with gallery slideshow controls)
     var externalShowControls: Bool?
 
+    /// Called when the user taps the VR view (used by gallery to toggle its own controls)
+    var onTapToggleControls: (() -> Void)?
+
     /// Called to go to next/previous media item (slideshow integration)
     var onNextItem: (() -> Void)?
     var onPreviousItem: (() -> Void)?
+
+    /// Media item for position saving (recently played tracking)
+    var mediaItem: (any MediaItem)?
+
+    /// Called when user manually triggers play (for slideshow sync)
+    var onManualPlayTriggered: (() -> Void)?
+
+    /// Reports (currentTime, duration) periodically for external scrub bar
+    var onTimeUpdate: ((Double, Double) -> Void)?
+
+    /// External seek request — set to a time value to seek, VR player resets to nil after seeking
+    @Binding var externalSeekRequest: Double?
 
     @State private var player: AVPlayer?
     @State private var currentProjection: VRProjection
@@ -54,6 +69,7 @@ public struct VRVideoPlayerView: View {
     @State private var fieldOfView: Double = 70
 
     @State private var showProjectionPicker = false
+    @State private var lastPositionSaveTime = Date.distantPast
 
     #if os(iOS)
     @State private var motionController: VRMotionController?
@@ -69,15 +85,25 @@ public struct VRVideoPlayerView: View {
     public init(url: URL, initialProjection: VRProjection, authHeaders: [String: String] = [:],
                 onVideoComplete: (() -> Void)? = nil, onProjectionChange: ((VRProjection) -> Void)? = nil,
                 externalShowControls: Bool? = nil,
-                onNextItem: (() -> Void)? = nil, onPreviousItem: (() -> Void)? = nil) {
+                onTapToggleControls: (() -> Void)? = nil,
+                onNextItem: (() -> Void)? = nil, onPreviousItem: (() -> Void)? = nil,
+                mediaItem: (any MediaItem)? = nil,
+                onManualPlayTriggered: (() -> Void)? = nil,
+                onTimeUpdate: ((Double, Double) -> Void)? = nil,
+                externalSeekRequest: Binding<Double?> = .constant(nil)) {
         self.url = url
         self.initialProjection = initialProjection
         self.authHeaders = authHeaders
         self.onVideoComplete = onVideoComplete
         self.onProjectionChange = onProjectionChange
         self.externalShowControls = externalShowControls
+        self.onTapToggleControls = onTapToggleControls
         self.onNextItem = onNextItem
         self.onPreviousItem = onPreviousItem
+        self.mediaItem = mediaItem
+        self.onManualPlayTriggered = onManualPlayTriggered
+        self.onTimeUpdate = onTimeUpdate
+        self._externalSeekRequest = externalSeekRequest
         self._currentProjection = State(initialValue: initialProjection)
     }
 
@@ -96,11 +122,18 @@ public struct VRVideoPlayerView: View {
                     gyroEnabled: $gyroEnabled,
                     fieldOfView: $fieldOfView,
                     onTap: {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            showControls.toggle()
-                        }
-                        if showControls {
-                            resetControlsTimer()
+                        if let onTapToggleControls = onTapToggleControls {
+                            // Gallery mode: forward tap to gallery so it toggles its own controls
+                            // (gallery syncs back via externalShowControls)
+                            onTapToggleControls()
+                        } else {
+                            // Standalone mode: toggle our own controls
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                showControls.toggle()
+                            }
+                            if showControls {
+                                resetControlsTimer()
+                            }
                         }
                     },
                     onPlayPause: {
@@ -123,41 +156,58 @@ public struct VRVideoPlayerView: View {
             // tvOS focus-based press handling. TVSCNView is never focusable — it only
             // handles pan gestures for look-around. All press events go through SwiftUI.
 
-            // When controls are hidden: invisible UIKit view captures Select press.
-            // Uses UIViewRepresentable (not SwiftUI Button) to avoid tvOS focus highlight.
-            // Menu/PlayPause pass through via UIView's responder chain → SwiftUI modifiers.
-            if !showControls && !showProjectionPicker {
-                TVFocusCaptureView {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        showControls = true
+            if externalShowControls != nil {
+                // External controls mode (gallery slideshow manages controls):
+                // Don't show our own controls overlay — the gallery's slideshow overlay
+                // handles prev/next/play/loop/etc. Just remove focus capture when the
+                // gallery's controls are visible so focus reaches the gallery's buttons.
+                if !showControls {
+                    TVFocusCaptureView {
+                        // Select press does nothing here — the gallery handles control toggling
                     }
-                    resetControlsTimer()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-
-            // When controls are visible: show overlay with focusable buttons.
-            // .onExitCommand hides controls.
-            if showControls {
-                controlsOverlay
-                    .transition(.opacity)
-                    .focusSection()
-                    .onExitCommand {
+                // When showControls is true (synced from gallery), no focus capture view
+                // is present, so focus naturally moves to the gallery's slideshow overlay.
+            } else {
+                // Standalone mode (VR player manages its own controls):
+                // When controls are hidden: invisible UIKit view captures Select press.
+                if !showControls && !showProjectionPicker {
+                    TVFocusCaptureView {
                         withAnimation(.easeInOut(duration: 0.25)) {
-                            showControls = false
+                            showControls = true
                         }
+                        resetControlsTimer()
                     }
-            }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
 
-            if showProjectionPicker {
-                projectionPickerOverlay
-                    .transition(.opacity)
-                    .focusSection()
-                    .onExitCommand {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            showProjectionPicker = false
+                // When controls are visible: show overlay with focusable buttons.
+                if showControls {
+                    controlsOverlay
+                        .transition(.opacity)
+                        .focusSection()
+                        .onExitCommand {
+                            if scrubMode {
+                                scrubMode = false
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    showControls = false
+                                }
+                            }
                         }
-                    }
+                }
+
+                if showProjectionPicker {
+                    projectionPickerOverlay
+                        .transition(.opacity)
+                        .focusSection()
+                        .onExitCommand {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showProjectionPicker = false
+                            }
+                        }
+                }
             }
             #else
             if showControls {
@@ -189,6 +239,13 @@ public struct VRVideoPlayerView: View {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = visible
                 }
+            }
+        }
+        .onChange(of: externalSeekRequest) { _, newValue in
+            if let seekTime = newValue {
+                currentTime = seekTime
+                player?.seek(to: CMTime(seconds: seekTime, preferredTimescale: 600))
+                externalSeekRequest = nil
             }
         }
         #if os(tvOS)
@@ -249,8 +306,6 @@ public struct VRVideoPlayerView: View {
                         togglePlayPause()
                     }
 
-                    Spacer().frame(width: 12)
-
                     // Reset view
                     vrControlButton(icon: "location.north.fill") {
                         manualYaw = 0
@@ -259,24 +314,17 @@ public struct VRVideoPlayerView: View {
                     }
 
                     #if os(iOS)
-                    // Gyro — hold to tilt
-                    Image(systemName: gyroEnabled ? "gyroscope" : "hand.draw")
-                        .font(.title3)
-                        .foregroundColor(gyroEnabled ? .cyan : .white)
-                        .frame(width: 50, height: 44)
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { _ in
-                                    if !gyroEnabled {
-                                        gyroEnabled = true
-                                        startMotion()
-                                    }
-                                }
-                                .onEnded { _ in
-                                    gyroEnabled = false
-                                    stopMotion()
-                                }
-                        )
+                    // Gyro toggle — tap to switch between swipe and sensor control
+                    vrControlButton(icon: gyroEnabled ? "gyroscope" : "hand.draw",
+                                    tint: gyroEnabled ? .cyan : nil) {
+                        if gyroEnabled {
+                            gyroEnabled = false
+                            stopMotion()
+                        } else {
+                            gyroEnabled = true
+                            startMotion()
+                        }
+                    }
                     #endif
 
                     // Projection picker — label shows current projection name
@@ -305,8 +353,6 @@ public struct VRVideoPlayerView: View {
                     #if os(tvOS)
                     // Prev/Next media item (slideshow navigation)
                     if onPreviousItem != nil || onNextItem != nil {
-                        Spacer().frame(width: 12)
-
                         if let onPrev = onPreviousItem {
                             vrControlButton(icon: "backward.end.fill") { onPrev() }
                         }
@@ -412,16 +458,33 @@ public struct VRVideoPlayerView: View {
                     duration = dur.seconds
                 }
             }
+            // Report time to external scrub bar
+            onTimeUpdate?(currentTime, duration)
+            // Save position periodically (every 10s) for recently played tracking
+            savePositionThrottled()
         }
 
         // End observer
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
-            queue: .main
-        ) { _ in
-            isPlaying = false
-            onVideoComplete?()
+            queue: nil  // Use posting queue to avoid main-thread contention during rapid loops
+        ) { [weak avPlayer] _ in
+            Task { @MainActor in
+                // Loop short videos (< 2 minutes) instead of completing
+                if duration > 0 && duration < 120, let player = avPlayer {
+                    player.seek(to: .zero)
+                    player.play()
+                    isPlaying = true
+                    return
+                }
+                isPlaying = false
+                // Video completed — clear saved position so it doesn't resume mid-video
+                if let item = mediaItem {
+                    Task { await MediaStreamConfiguration.savePosition(for: item, position: 0) }
+                }
+                onVideoComplete?()
+            }
         }
 
         avPlayer.play()
@@ -433,6 +496,9 @@ public struct VRVideoPlayerView: View {
     }
 
     private func cleanup() {
+        // Save final position before tearing down
+        savePositionNow()
+
         controlsTimer?.invalidate()
         controlsTimer = nil
 
@@ -465,6 +531,7 @@ public struct VRVideoPlayerView: View {
             player?.pause()
         } else {
             player?.play()
+            onManualPlayTriggered?()
         }
         isPlaying.toggle()
     }
@@ -492,6 +559,25 @@ public struct VRVideoPlayerView: View {
         return "\(mins):\(String(format: "%02d", secs))"
     }
 
+    // MARK: - Position Saving
+
+    /// Save position throttled (every 10s) — called from periodic time observer
+    private func savePositionThrottled() {
+        guard let item = mediaItem, currentTime > 0 else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastPositionSaveTime) >= 10 else { return }
+        lastPositionSaveTime = now
+        let pos = currentTime
+        Task { await MediaStreamConfiguration.savePosition(for: item, position: pos) }
+    }
+
+    /// Save position immediately — called on cleanup/disappear
+    private func savePositionNow() {
+        guard let item = mediaItem, currentTime > 0 else { return }
+        let pos = currentTime
+        Task { await MediaStreamConfiguration.savePosition(for: item, position: pos) }
+    }
+
     // MARK: - Motion (iOS)
 
     #if os(iOS)
@@ -508,6 +594,13 @@ public struct VRVideoPlayerView: View {
     private func stopMotion() {
         motionController?.stop()
         motionController = nil
+        // Fold gyro offsets into manual so the view stays at the current orientation
+        let gy = sceneCoordinator?.gyroYaw ?? gyroYaw
+        let gp = sceneCoordinator?.gyroPitch ?? gyroPitch
+        manualYaw += gy
+        manualPitch += gp
+        sceneCoordinator?.manualYaw = manualYaw
+        sceneCoordinator?.manualPitch = manualPitch
         sceneCoordinator?.gyroYaw = 0
         sceneCoordinator?.gyroPitch = 0
         gyroYaw = 0
@@ -568,6 +661,17 @@ private struct VRControlBtnStyle: ButtonStyle {
             .scaleEffect(isFocused ? 1.15 : (configuration.isPressed ? 0.9 : 1.0))
             .animation(.easeInOut(duration: 0.15), value: isFocused)
             .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+/// Button style for the scrub bar — no scale effect (would overflow screen), just opacity change.
+private struct VRScrubBarBtnStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(isFocused ? 1.0 : 0.7)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 #endif
@@ -651,26 +755,27 @@ struct VRScrubBar: View {
             }
             .animation(.easeInOut(duration: 0.2), value: scrubMode)
         }
-        .buttonStyle(VRControlBtnStyle())
-        // Only intercept move/exit when actively scrubbing.
-        // When not scrubbing, these must NOT be present — they always consume presses
-        // and would block focus navigation and menu dismiss.
-        .if(scrubMode) { view in
-            view
-                .onMoveCommand { direction in
-                    switch direction {
-                    case .left:
-                        scrubPreviewTime = max(0, scrubPreviewTime - 5)
-                    case .right:
-                        scrubPreviewTime = min(duration, scrubPreviewTime + 5)
-                    default:
-                        break
-                    }
-                }
-                .onExitCommand {
-                    scrubMode = false
-                }
+        // No scale effect on scrub bar — VRControlBtnStyle scales the whole view which
+        // makes the bar overflow beyond screen edges. Use a subtle highlight instead.
+        .buttonStyle(VRScrubBarBtnStyle())
+        // Always apply onMoveCommand but only act when scrubMode is active.
+        // Using .if() to conditionally add these modifiers changes the view identity,
+        // causing SwiftUI to recreate the button and lose focus — so scrub mode would
+        // immediately break. Instead we always have them but guard the handlers.
+        .onMoveCommand { direction in
+            guard scrubMode else { return }
+            switch direction {
+            case .left:
+                scrubPreviewTime = max(0, scrubPreviewTime - 5)
+            case .right:
+                scrubPreviewTime = min(duration, scrubPreviewTime + 5)
+            default:
+                break
+            }
         }
+        // NOTE: .onExitCommand is NOT placed here — it would always consume Menu presses
+        // and prevent the parent controlsOverlay from dismissing. Instead, the parent
+        // .onExitCommand checks scrubMode and cancels scrub or dismisses controls.
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -708,6 +813,15 @@ struct TVFocusCaptureView: UIViewRepresentable {
         override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
             // No visual change on focus — plain UIView with clear background
             // doesn't get the system focus highlight (that's only on UIButton/UIImageView)
+        }
+
+        // Pass ALL touch events through to views below (SCNView's pan gesture).
+        // This view only needs to handle press events (Select/Menu/PlayPause)
+        // via the responder chain — touches for pan/swipe must reach the SCNView.
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            // Return nil for touch events so they pass through to the SCNView underneath.
+            // Press events don't go through hitTest — they use the focus system.
+            return nil
         }
 
         override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {

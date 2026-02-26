@@ -160,6 +160,8 @@ struct CustomVideoPlayerView: View {
     var videoLoopCount: Int = 0
     var onVideoComplete: (() -> Void)? = nil
     var onManualPlayTriggered: (() -> Void)? = nil
+    /// Flat crop projection (SBS/TB/HSBS/HTB) for cropping stereo video to single eye
+    var cropProjection: VRProjection? = nil
     @Binding var savedPosition: Double
     @Binding var wasAtEnd: Bool
 
@@ -192,7 +194,7 @@ struct CustomVideoPlayerView: View {
         ZStack {
             // Video player layer
             #if canImport(UIKit)
-            VideoPlayerRepresentable(player: player) { playerLayer in
+            VideoPlayerRepresentable(player: player, cropProjection: cropProjection) { playerLayer in
                 // Defer state modification to avoid "Modifying state during view update"
                 DispatchQueue.main.async {
                     // Store the player layer for PiP setup
@@ -210,7 +212,7 @@ struct CustomVideoPlayerView: View {
                 }
             }
             #elseif canImport(AppKit)
-            VideoPlayerRepresentable(player: player)
+            VideoPlayerRepresentable(player: player, cropProjection: cropProjection)
             #endif
 
             // Video controls overlay - sync with parent's showControls
@@ -1093,9 +1095,131 @@ struct AudioPlayerControlsView: View {
     }
 }
 
+/// SwiftUI-level crop for WebView video player (flat crop projections).
+/// Used when AVFoundation isn't available and the video falls back to WKWebView,
+/// which doesn't support AVPlayerLayer-based cropping.
+///
+/// SBS (full side-by-side): video is 2x eye width (e.g. 3840x1080). Each eye is full resolution.
+///   → Render in 2x-wide frame so video fills at native scale, clip to left half.
+/// HSBS (half side-by-side): video is normal width (e.g. 1920x1080), each eye squeezed to half.
+///   → Scale 2x horizontally from left edge so left eye fills the view, clip overflow.
+/// TB (full top-bottom): video is 2x eye height. Each eye is full resolution.
+///   → Render in 2x-tall frame, clip to top half.
+/// HTB (half top-bottom): video is normal height, each eye squeezed to half.
+///   → Scale 2x vertically from top edge so top eye fills the view, clip overflow.
+private struct WebViewCropModifier: ViewModifier {
+    let projection: VRProjection?
+
+    func body(content: Content) -> some View {
+        if let proj = projection {
+            GeometryReader { geo in
+                switch proj {
+                case .sbs:
+                    // Full SBS: render at 2x width, clip to left half
+                    content
+                        .frame(width: geo.size.width * 2, height: geo.size.height)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
+                case .hsbs:
+                    // Half SBS: scale 2x horizontally from left edge to unsqueeze left eye
+                    content
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(x: 2.0, y: 1.0, anchor: .leading)
+                case .tb:
+                    // Full TB: render at 2x height, clip to top half
+                    content
+                        .frame(width: geo.size.width, height: geo.size.height * 2)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                case .htb:
+                    // Half TB: scale 2x vertically from top edge to unsqueeze top eye
+                    content
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(x: 1.0, y: 2.0, anchor: .top)
+                default:
+                    content
+                        .frame(width: geo.size.width, height: geo.size.height)
+                }
+            }
+            .clipped()
+        } else {
+            content
+        }
+    }
+}
+
+/// Calculate the AVPlayerLayer frame for flat crop projections.
+/// The layer is sized so that the desired eye half (left for SBS, top for TB)
+/// is aspect-fit and centered within the view bounds. The rest overflows and is clipped.
+private func cropLayerFrame(crop: VRProjection, viewBounds: CGRect, naturalSize: CGSize?) -> CGRect {
+    let vw = viewBounds.width
+    let vh = viewBounds.height
+    guard vw > 0, vh > 0 else { return viewBounds }
+
+    let ns = naturalSize ?? CGSize(width: 1920, height: 1080)
+    guard ns.width > 0, ns.height > 0 else { return viewBounds }
+
+    // Determine the display aspect ratio of a single eye
+    let eyeAspect: CGFloat
+    switch crop {
+    case .sbs:
+        // Full SBS: video 2x wide, each eye is half the source width
+        eyeAspect = (ns.width / 2) / ns.height
+    case .hsbs:
+        // Half SBS: each eye stored at half-width; correct aspect = source width / height
+        eyeAspect = ns.width / ns.height
+    case .tb:
+        // Full TB: video 2x tall, each eye is half the source height
+        eyeAspect = ns.width / (ns.height / 2)
+    case .htb:
+        // Half TB: each eye at half-height; correct aspect = source width / height
+        eyeAspect = ns.width / ns.height
+    default:
+        return viewBounds
+    }
+
+    // Aspect-fit the single eye into the view
+    let displayW: CGFloat
+    let displayH: CGFloat
+    if eyeAspect > vw / vh {
+        displayW = vw
+        displayH = vw / eyeAspect
+    } else {
+        displayH = vh
+        displayW = vh * eyeAspect
+    }
+
+    let offsetX = (vw - displayW) / 2
+    let offsetY = (vh - displayH) / 2
+
+    switch crop {
+    case .sbs, .hsbs:
+        return CGRect(x: offsetX, y: offsetY, width: displayW * 2, height: displayH)
+    case .tb, .htb:
+        return CGRect(x: offsetX, y: offsetY, width: displayW, height: displayH * 2)
+    default:
+        return viewBounds
+    }
+}
+
+/// Returns the size of the single-eye region within the crop layer's local coordinate space.
+/// Used to mask the AVPlayerLayer so the other eye doesn't bleed into the visible area.
+private func cropEyeSize(crop: VRProjection, layerFrame: CGRect) -> CGSize {
+    switch crop {
+    case .sbs, .hsbs:
+        // Eye is the left half of the layer
+        return CGSize(width: layerFrame.width / 2, height: layerFrame.height)
+    case .tb, .htb:
+        // Eye is the top half of the layer
+        return CGSize(width: layerFrame.width, height: layerFrame.height / 2)
+    default:
+        return layerFrame.size
+    }
+}
+
 #if canImport(UIKit)
 struct VideoPlayerRepresentable: UIViewRepresentable {
     let player: AVPlayer
+    /// Flat crop projection (SBS/TB/HSBS/HTB) — crops and scales the video layer
+    var cropProjection: VRProjection?
     var onPlayerLayerReady: ((AVPlayerLayer) -> Void)?
 
     func makeUIView(context: Context) -> PlayerContainerView {
@@ -1109,9 +1233,11 @@ struct VideoPlayerRepresentable: UIViewRepresentable {
         let playerLayer = AVPlayerLayer(player: player)
         playerLayer.videoGravity = .resizeAspect
         view.layer.addSublayer(playerLayer)
+        view.clipsToBounds = true
 
         context.coordinator.playerLayer = playerLayer
         view.playerLayer = playerLayer
+        view.cropProjection = cropProjection
 
         // Notify that the player layer is ready (for PiP setup)
         onPlayerLayerReady?(playerLayer)
@@ -1128,6 +1254,11 @@ struct VideoPlayerRepresentable: UIViewRepresentable {
                 onPlayerLayerReady?(layer)
             }
         }
+        // Update crop projection
+        if uiView.cropProjection != cropProjection {
+            uiView.cropProjection = cropProjection
+            uiView.setNeedsLayout()
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1141,20 +1272,53 @@ struct VideoPlayerRepresentable: UIViewRepresentable {
 
 class PlayerContainerView: UIView {
     var playerLayer: AVPlayerLayer?
+    /// Flat crop projection — crops stereo video to show single eye with correct aspect ratio
+    var cropProjection: VRProjection?
+    private var statusObserver: NSKeyValueObservation?
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Update player layer frame whenever the view's bounds change
-        playerLayer?.frame = bounds
+        guard let playerLayer = playerLayer else { return }
+
+        guard let crop = cropProjection else {
+            playerLayer.videoGravity = .resizeAspect
+            playerLayer.frame = bounds
+            playerLayer.mask = nil
+            return
+        }
+
+        playerLayer.videoGravity = .resize
+        let naturalSize = playerLayer.player?.currentItem?.presentationSize
+        let frame = cropLayerFrame(crop: crop, viewBounds: bounds, naturalSize: naturalSize == .zero ? nil : naturalSize)
+        playerLayer.frame = frame
+
+        // Mask the player layer to show only the single eye region.
+        // Without this, the other eye bleeds into the visible area when the eye
+        // is narrower/shorter than the view (pillarboxed/letterboxed).
+        let eyeSize = cropEyeSize(crop: crop, layerFrame: frame)
+        let maskLayer = CALayer()
+        maskLayer.backgroundColor = CGColor(gray: 1, alpha: 1)
+        maskLayer.frame = CGRect(origin: .zero, size: eyeSize)
+        playerLayer.mask = maskLayer
+
+        // Observe player item status to relayout once video size is known
+        if statusObserver == nil, let item = playerLayer.player?.currentItem {
+            statusObserver = item.observe(\.status, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.setNeedsLayout() }
+            }
+        }
     }
 }
 #elseif canImport(AppKit)
 struct VideoPlayerRepresentable: NSViewRepresentable {
     let player: AVPlayer
+    /// Flat crop projection (SBS/TB/HSBS/HTB) — crops and scales the video layer
+    var cropProjection: VRProjection?
 
     func makeNSView(context: Context) -> PlayerView {
         let view = PlayerView()
         view.player = player
+        view.cropProjection = cropProjection
         return view
     }
 
@@ -1162,22 +1326,27 @@ struct VideoPlayerRepresentable: NSViewRepresentable {
         if nsView.player !== player {
             nsView.player = player
         }
+        if nsView.cropProjection != cropProjection {
+            nsView.cropProjection = cropProjection
+            nsView.needsLayout = true
+        }
     }
 }
 
 class PlayerView: NSView {
+    /// The AVPlayerLayer is always a sublayer of the backing CALayer.
+    private var avPlayerLayer: AVPlayerLayer?
+
     var player: AVPlayer? {
         didSet {
-            if let layer = self.layer as? AVPlayerLayer {
-                layer.player = player
-                layer.setNeedsDisplay()
-            }
+            avPlayerLayer?.player = player
+            avPlayerLayer?.setNeedsDisplay()
         }
     }
 
-    private var playerLayer: AVPlayerLayer? {
-        return layer as? AVPlayerLayer
-    }
+    /// Flat crop projection for SBS/TB/HSBS/HTB
+    var cropProjection: VRProjection?
+    private var statusObserver: NSKeyValueObservation?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1192,14 +1361,22 @@ class PlayerView: NSView {
     }
 
     override func makeBackingLayer() -> CALayer {
-        let layer = AVPlayerLayer()
-        layer.videoGravity = .resizeAspect
-        layer.backgroundColor = currentBackgroundColor
-        layer.needsDisplayOnBoundsChange = true
+        // Always use a plain container with AVPlayerLayer as sublayer.
+        // This avoids timing issues where cropProjection isn't set yet
+        // (makeBackingLayer is called during init, before properties are configured).
+        let container = CALayer()
+        container.masksToBounds = true
+        container.backgroundColor = currentBackgroundColor
+
+        let avLayer = AVPlayerLayer()
+        avLayer.videoGravity = .resizeAspect
+        avLayer.needsDisplayOnBoundsChange = true
         if let player = player {
-            layer.player = player
+            avLayer.player = player
         }
-        return layer
+        container.addSublayer(avLayer)
+        avPlayerLayer = avLayer
+        return container
     }
 
     /// Get the correct background color for the current appearance
@@ -1222,49 +1399,65 @@ class PlayerView: NSView {
 
     override func layout() {
         super.layout()
-        if let playerLayer = self.layer as? AVPlayerLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            playerLayer.frame = bounds
-            CATransaction.commit()
+        guard let avLayer = avPlayerLayer else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        if let crop = cropProjection {
+            avLayer.videoGravity = .resize
+            let naturalSize = avLayer.player?.currentItem?.presentationSize
+            let layerFrame = cropLayerFrame(crop: crop, viewBounds: bounds, naturalSize: naturalSize == .zero ? nil : naturalSize)
+            avLayer.frame = layerFrame
+
+            // Mask the player layer to show only the single eye region.
+            let eyeSize = cropEyeSize(crop: crop, layerFrame: layerFrame)
+            let maskLayer = CALayer()
+            maskLayer.backgroundColor = CGColor(gray: 1, alpha: 1)
+            maskLayer.frame = CGRect(origin: .zero, size: eyeSize)
+            avLayer.mask = maskLayer
+
+            // Observe player item status to relayout once video size is known
+            if statusObserver == nil, let item = avLayer.player?.currentItem {
+                statusObserver = item.observe(\.status, options: [.new]) { [weak self] _, _ in
+                    DispatchQueue.main.async { self?.needsLayout = true }
+                }
+            }
+        } else {
+            avLayer.videoGravity = .resizeAspect
+            avLayer.frame = bounds
+            avLayer.mask = nil
         }
+
+        CATransaction.commit()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // Ensure layer is set up when view is added to window
-        if window != nil, let layer = self.layer as? AVPlayerLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.frame = bounds
-            layer.backgroundColor = currentBackgroundColor
-            CATransaction.commit()
-            if let player = player {
-                layer.player = player
-                layer.setNeedsDisplay()
-            }
+        guard window != nil else { return }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.backgroundColor = currentBackgroundColor
+        if let player = player {
+            avPlayerLayer?.player = player
+            avPlayerLayer?.setNeedsDisplay()
         }
+        CATransaction.commit()
+        needsLayout = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        // Update background color when appearance changes (light/dark mode)
-        if let layer = self.layer as? AVPlayerLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.backgroundColor = currentBackgroundColor
-            CATransaction.commit()
-        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.backgroundColor = currentBackgroundColor
+        CATransaction.commit()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if let playerLayer = self.layer as? AVPlayerLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            playerLayer.frame = bounds
-            CATransaction.commit()
-        }
+        needsLayout = true
     }
 }
 #endif
@@ -1313,9 +1506,13 @@ struct ZoomableMediaView: View {
     var vrProjectionOverride: VRProjection? = nil
     /// Called when VR projection is changed via the in-player picker
     var onVRProjectionChange: ((VRProjection) -> Void)? = nil
+    /// Called when VR view is tapped to toggle controls (gallery integration)
+    var onVRTapToggleControls: (() -> Void)? = nil
     /// Called to go to next/previous media item (tvOS VR slideshow controls)
     var onNextItem: (() -> Void)? = nil
     var onPreviousItem: (() -> Void)? = nil
+    /// Called when VR video reports its duration (for auto-loop mode sync)
+    var onVRDurationKnown: ((Double) -> Void)? = nil
 
     @State private var image: PlatformImage?
     @State private var videoURL: URL?
@@ -1432,8 +1629,14 @@ struct ZoomableMediaView: View {
                 onVideoComplete: onVideoComplete,
                 onProjectionChange: onVRProjectionChange,
                 externalShowControls: showControls,
+                onTapToggleControls: onVRTapToggleControls,
                 onNextItem: onNextItem,
-                onPreviousItem: onPreviousItem
+                onPreviousItem: onPreviousItem,
+                mediaItem: mediaItem,
+                onManualPlayTriggered: onManualPlayTriggered,
+                onTimeUpdate: { _, dur in
+                    if dur > 0 { onVRDurationKnown?(dur) }
+                }
             )
         } else {
             ZStack {
@@ -1444,6 +1647,14 @@ struct ZoomableMediaView: View {
                 }
             }
         }
+    }
+
+    /// Flat crop projection for non-sphere VR modes (SBS/TB/HSBS/HTB)
+    /// Returns nil for .flat (no crop needed) and sphere modes
+    private var flatCropProjection: VRProjection? {
+        guard let proj = effectiveVRProjection, !proj.requiresSphere else { return nil }
+        if proj == .flat { return nil }
+        return proj
     }
 
     /// Regular (non-VR) video content, extracted to reduce type-checker complexity.
@@ -1460,6 +1671,9 @@ struct ZoomableMediaView: View {
                     showVolumeSlider: false,
                     onVideoEnd: onVideoComplete
                 )
+                // SwiftUI-level crop for WebView when flat crop projection is active.
+                // AVFoundation uses layer-based crop (more precise), but WebView needs view-level crop.
+                .modifier(WebViewCropModifier(projection: flatCropProjection))
 
                 if !videoController.isReady {
                     Color(PlatformColor.adaptiveBackground)
@@ -1479,6 +1693,7 @@ struct ZoomableMediaView: View {
                 videoLoopCount: videoLoopCount,
                 onVideoComplete: onVideoComplete,
                 onManualPlayTriggered: onManualPlayTriggered,
+                cropProjection: flatCropProjection,
                 savedPosition: $savedVideoPosition,
                 wasAtEnd: $videoWasAtEnd
             )
@@ -1502,6 +1717,7 @@ struct ZoomableMediaView: View {
                 videoLoopCount: videoLoopCount,
                 onVideoComplete: onVideoComplete,
                 onManualPlayTriggered: onManualPlayTriggered,
+                cropProjection: flatCropProjection,
                 savedPosition: $savedVideoPosition,
                 wasAtEnd: $videoWasAtEnd
             )
@@ -1603,7 +1819,7 @@ struct ZoomableMediaView: View {
                             animatedImageContent(geometry: geometry)
                         } else if mediaItem.type == .image, let image = image {
                             imageContent(image: image, geometry: geometry)
-                        } else if mediaItem.type == .video, effectiveVRProjection != nil {
+                        } else if mediaItem.type == .video, let vrProj = effectiveVRProjection, vrProj.requiresSphere {
                             vrVideoContent
                         } else if mediaItem.type == .video {
                             regularVideoContent
@@ -1671,8 +1887,13 @@ struct ZoomableMediaView: View {
         }
         .onChange(of: vrProjectionOverride) { _, newValue in
             guard mediaItem.type == .video else { return }
-            if newValue != nil {
-                // Switching TO VR mode: stop the regular AVPlayer so it doesn't
+            // Resolve the effective projection after the override change
+            let effectiveProj = newValue ?? mediaItem.vrProjection
+            let needsSphere = effectiveProj?.requiresSphere == true
+            let wasSphere = videoPlayer == nil && videoURL != nil  // VR sphere manages its own player
+
+            if needsSphere && !wasSphere {
+                // Switching TO VR sphere mode: stop the regular AVPlayer so it doesn't
                 // compete with VRVideoPlayerView's own player
                 if let player = videoPlayer {
                     MediaPlaybackService.shared.unregisterExternalPlayer(player, forMediaId: mediaItem.id)
@@ -1685,12 +1906,17 @@ struct ZoomableMediaView: View {
                     useWebViewForVideo = false
                 }
                 #endif
-            } else {
-                // Switching FROM VR mode back to regular: reload media
+            } else if !needsSphere && wasSphere {
+                // Switching FROM VR sphere to regular/flat crop: reload media
                 hasLoadedMedia = false
                 videoURL = nil
+                videoPlayer = nil
+                isLoading = true
                 Task { await loadMedia() }
             }
+            // If switching between flat crop modes (or between sphere modes),
+            // no reload needed — SwiftUI will update the crop via flatCropProjection
+            // or the VR view via effectiveVRProjection automatically.
         }
         .onChange(of: isCurrentSlide) { oldValue, newValue in
             if mediaItem.type == .video {
@@ -2231,8 +2457,8 @@ struct ZoomableMediaView: View {
             }
             #endif
         case .video:
-            // VR videos: just need the URL, VRVideoPlayerView manages its own AVPlayer
-            if effectiveVRProjection != nil {
+            // VR sphere videos: just need the URL, VRVideoPlayerView manages its own AVPlayer
+            if let vrProj = effectiveVRProjection, vrProj.requiresSphere {
                 if let url = await mediaItem.loadVideoURL() {
                     videoURL = url
                     hasLoadedMedia = true
@@ -2244,15 +2470,14 @@ struct ZoomableMediaView: View {
             if let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) }),
                FileManager.default.fileExists(atPath: localURL.path) {
                 // Use local cached file - AVFoundation always handles local files
-                videoURL = localURL
-                hasLoadedMedia = true
-
                 let playerItem = AVPlayerItem(url: localURL)
                 let player = AVPlayer(playerItem: playerItem)
 
                 await MainActor.run {
                     useWebViewForVideo = false
                     videoPlayer = player
+                    videoURL = localURL
+                    hasLoadedMedia = true
                 }
             } else if let url = await mediaItem.loadVideoURL() {
                 // Fall back to remote URL
@@ -2260,9 +2485,6 @@ struct ZoomableMediaView: View {
                 if url.isFileURL {
                     guard FileManager.default.fileExists(atPath: url.path) else { return }
                 }
-
-                videoURL = url
-                hasLoadedMedia = true
 
                 // Check file extension to determine player type
                 // WebM requires WKWebView (AVFoundation doesn't support WebM/VP8/VP9)
@@ -2274,13 +2496,12 @@ struct ZoomableMediaView: View {
                 #if canImport(WebKit)
                 if isWebM {
                     // WebM: Must use WKWebView player (AVFoundation doesn't support WebM codec)
-                    await MainActor.run {
-                        useWebViewForVideo = true
-                    }
-
                     let headers = await MediaStreamConfiguration.headersAsync(for: url)
 
                     await MainActor.run {
+                        useWebViewForVideo = true
+                        videoURL = url
+                        hasLoadedMedia = true
                         if videoController.webView == nil {
                             _ = videoController.createWebView()
                         }
@@ -2300,7 +2521,15 @@ struct ZoomableMediaView: View {
 
                 if useAVFoundation {
                     // Non-WebM (or no WebKit): Try AVFoundation (better performance/controls)
-                    let playerItem = AVPlayerItem(url: url)
+                    // Include auth headers so rclone-served URLs don't fail with -1013
+                    let headers = await MediaStreamConfiguration.headersAsync(for: url)
+                    let asset: AVURLAsset
+                    if let headers = headers, !headers.isEmpty {
+                        asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+                    } else {
+                        asset = AVURLAsset(url: url)
+                    }
+                    let playerItem = AVPlayerItem(asset: asset)
                     let player = AVPlayer(playerItem: playerItem)
 
                     // Wait a moment to check if AVPlayer can load the video
@@ -2314,10 +2543,14 @@ struct ZoomableMediaView: View {
                             await MainActor.run {
                                 useWebViewForVideo = false
                                 videoPlayer = player
+                                videoURL = url
+                                hasLoadedMedia = true
                             }
                         } else {
                             #if canImport(WebKit)
                             // AVFoundation can't play it - fallback to WebView
+                            videoURL = url
+                            hasLoadedMedia = true
                             await fallbackToWebView(url: url)
                             #endif
                         }
@@ -2325,6 +2558,8 @@ struct ZoomableMediaView: View {
                         #if canImport(WebKit)
                         // AVFoundation failed - fallback to WebView
                         print("AVFoundation failed to load video: \(error.localizedDescription), falling back to WebView")
+                        videoURL = url
+                        hasLoadedMedia = true
                         await fallbackToWebView(url: url)
                         #endif
                     }
