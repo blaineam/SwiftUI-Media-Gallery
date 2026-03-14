@@ -485,10 +485,12 @@ public final class MediaDownloadManager: ObservableObject {
 
         if MediaStreamConfiguration.encryptDownloads,
            let provider = MediaStreamConfiguration.encryptionProvider {
-            // Read downloaded data, encrypt it, write encrypted file
-            let rawData = try Data(contentsOf: tempURL)
+            // Read downloaded data, encrypt it, write encrypted file — off main thread
+            let encryptedData = try await Task.detached(priority: .userInitiated) { () throws -> Data in
+                let rawData = try Data(contentsOf: tempURL)
+                return try provider.encrypt(rawData)
+            }.value
             try? fileManager.removeItem(at: tempURL)
-            let encryptedData = try provider.encrypt(rawData)
             try encryptedData.write(to: destinationURL, options: .atomic)
             print("[MediaDownloadManager] Downloaded and encrypted: \(destinationURL.lastPathComponent)")
         } else {
