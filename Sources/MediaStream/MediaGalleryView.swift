@@ -816,7 +816,11 @@ public struct MediaGalleryView: View {
 
             // PiP toggle button - only show for video when cached and background enabled
             #if canImport(UIKit) && !os(macOS)
-            if mediaItems[currentIndex].type == .video && MediaDownloadManager.shared.isCached(mediaItem: mediaItems[currentIndex]) && MediaStreamConfiguration.backgroundAudioEnabled {
+            let currentItem = mediaItems[currentIndex]
+            let showPiP = currentItem.type == .video
+                && MediaDownloadManager.shared.isCached(mediaItem: currentItem)
+                && MediaStreamConfiguration.backgroundAudioEnabled
+            if showPiP {
                 MediaStreamGlassButton(action: { playbackService.togglePiP(); resetControlsTimer() }) {
                     Image(systemName: playbackService.isPiPActive ? "pip.exit" : "pip.enter")
                         .font(.system(size: 14, weight: .semibold))

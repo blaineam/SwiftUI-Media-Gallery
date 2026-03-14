@@ -349,6 +349,26 @@ public final class MediaDownloadManager: ObservableObject {
         }
     }
 
+    /// Clear all encrypted downloaded files without decrypting them.
+    /// Use this when the passphrase is removed and decryption is no longer possible.
+    /// Files will be re-downloaded with the new encryption state on demand.
+    public func clearEncryptedDownloads() {
+        guard let enumerator = fileManager.enumerator(
+            at: downloadDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        var count = 0
+        while let fileURL = enumerator.nextObject() as? URL {
+            if fileURL.pathExtension == "enc" {
+                try? fileManager.removeItem(at: fileURL)
+                count += 1
+            }
+        }
+        print("[MediaDownloadManager] Cleared \(count) encrypted download files")
+    }
+
     /// Migrate existing downloaded files when the encryptDownloads setting changes.
     /// When enabling encryption: encrypts all plain files and renames with .enc extension.
     /// When disabling encryption: decrypts all .enc files and removes the extension.
