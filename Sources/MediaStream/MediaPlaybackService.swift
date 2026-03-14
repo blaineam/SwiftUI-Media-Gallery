@@ -312,16 +312,36 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
 
     private func setupAudioSession() {
         #if canImport(UIKit)
+        configureAudioSession()
+        #endif
+    }
+
+    /// Reconfigure the audio session based on the current backgroundAudioEnabled setting.
+    /// Call this when MediaStreamConfiguration.backgroundAudioEnabled changes at runtime.
+    public func reconfigureAudioSession() {
+        #if canImport(UIKit)
+        configureAudioSession()
+        #endif
+    }
+
+    #if canImport(UIKit)
+    private func configureAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [])
+            if MediaStreamConfiguration.backgroundAudioEnabled {
+                try session.setCategory(.playback, mode: .default, options: [])
+                print("[MediaPlaybackService] Audio session configured for background playback")
+            } else {
+                // Use ambient so audio stops when app backgrounds and doesn't register for lock screen controls
+                try session.setCategory(.ambient, mode: .default, options: [])
+                print("[MediaPlaybackService] Audio session configured for foreground-only playback (encryption mode)")
+            }
             try session.setActive(true)
-            print("[MediaPlaybackService] Audio session configured for background playback")
         } catch {
             print("[MediaPlaybackService] Failed to configure audio session: \(error)")
         }
-        #endif
     }
+    #endif
 
     // MARK: - PiP Support
 
@@ -1460,10 +1480,11 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
             return
         }
 
-        // Get URL - prefer cached, fall back to source
+        // Get URL - prefer cached (when background enabled), fall back to source
+        // When encryptDownloads is true, skip cached files (they're encrypted and can't be played directly)
         var audioURL: URL?
 
-        if MediaDownloadManager.shared.isCached(mediaItem: mediaItem) {
+        if MediaDownloadManager.shared.isCached(mediaItem: mediaItem) && MediaStreamConfiguration.backgroundAudioEnabled {
             audioURL = MediaDownloadManager.shared.localURL(for: mediaItem)
             print("[MediaPlaybackService] Loading cached audio: \(audioURL?.lastPathComponent ?? "unknown")")
         } else if let sourceURL = mediaItem.sourceURL {

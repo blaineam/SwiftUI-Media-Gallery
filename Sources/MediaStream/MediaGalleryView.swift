@@ -544,11 +544,10 @@ public struct MediaGalleryView: View {
         }
         #if canImport(UIKit)
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.shouldPauseForBackgroundNotification)) { _ in
-            // Only stop slideshow for NON-CACHED media when entering background
-            // Cached media should continue playing in background
+            // Only continue background playback for cached media when background audio is enabled
             let currentItem = mediaItems[currentIndex]
-            guard !MediaDownloadManager.shared.isCached(mediaItem: currentItem) else {
-                return // Don't stop slideshow for cached media
+            guard !MediaDownloadManager.shared.isCached(mediaItem: currentItem) || !MediaStreamConfiguration.backgroundAudioEnabled else {
+                return // Don't stop slideshow for cached media with background audio enabled
             }
 
             if isSlideshowPlaying {
@@ -815,9 +814,9 @@ public struct MediaGalleryView: View {
                 }
             }
 
-            // PiP toggle button - only show for video when cached
+            // PiP toggle button - only show for video when cached and background enabled
             #if canImport(UIKit) && !os(macOS)
-            if mediaItems[currentIndex].type == .video && MediaDownloadManager.shared.isCached(mediaItem: mediaItems[currentIndex]) {
+            if mediaItems[currentIndex].type == .video && MediaDownloadManager.shared.isCached(mediaItem: mediaItems[currentIndex]) && MediaStreamConfiguration.backgroundAudioEnabled {
                 MediaStreamGlassButton(action: { playbackService.togglePiP(); resetControlsTimer() }) {
                     Image(systemName: playbackService.isPiPActive ? "pip.exit" : "pip.enter")
                         .font(.system(size: 14, weight: .semibold))
@@ -880,12 +879,13 @@ public struct MediaGalleryView: View {
     // See MediaDownloadManager for local caching support.
 
     /// Setup the playback service for background audio/video playback
-    /// Only includes cached items in the playlist
+    /// Only includes cached items when background audio is enabled
     private func setupPlaybackService() {
         let currentItem = mediaItems[currentIndex]
 
-        // Only enable background playback for cached items
-        guard MediaDownloadManager.shared.isCached(mediaItem: currentItem) else {
+        // Only enable background playback for cached items when background audio is enabled
+        // Background audio is disabled when encryptDownloads is true
+        guard MediaDownloadManager.shared.isCached(mediaItem: currentItem) && MediaStreamConfiguration.backgroundAudioEnabled else {
             playbackService.externalPlaybackMode = false
             return
         }

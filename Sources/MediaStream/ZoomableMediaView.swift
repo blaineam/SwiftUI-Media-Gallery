@@ -2068,14 +2068,13 @@ struct ZoomableMediaView: View {
         }
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.shouldPauseForBackgroundNotification)) { _ in
-            // Only pause NON-CACHED media when app enters background
-            // Cached media should continue playing in background
+            // Only continue background playback for cached, unencrypted media
             let isCached = MediaDownloadManager.shared.isCached(mediaItem: mediaItem)
+            let backgroundEnabled = MediaStreamConfiguration.backgroundAudioEnabled
             let diskCacheKey = mediaItem.diskCacheKey
-            let localURL = MediaDownloadManager.shared.localURL(for: mediaItem)
-            print("[ZoomableMediaView] Background check - isCached: \(isCached), diskCacheKey: \(diskCacheKey ?? "nil"), localURL: \(localURL?.path ?? "nil")")
+            print("[ZoomableMediaView] Background check - isCached: \(isCached), backgroundEnabled: \(backgroundEnabled), diskCacheKey: \(diskCacheKey ?? "nil")")
 
-            if isCached {
+            if isCached && backgroundEnabled {
                 // Keep audio session active for cached media background playback
                 try? AVAudioSession.sharedInstance().setActive(true)
                 print("[ZoomableMediaView] ✅ Background: keeping cached media playing")
@@ -2466,17 +2465,17 @@ struct ZoomableMediaView: View {
                 return
             }
 
-            // Check local cache first for background playback support
-            if let localURL = await MainActor.run(body: { MediaDownloadManager.shared.localURL(for: mediaItem) }),
-               FileManager.default.fileExists(atPath: localURL.path) {
+            // Check local cache first (decrypts to temp if encryptDownloads is true)
+            if let cachedURL = await MediaDownloadManager.shared.playbackURL(for: mediaItem),
+               FileManager.default.fileExists(atPath: cachedURL.path) {
                 // Use local cached file - AVFoundation always handles local files
-                let playerItem = AVPlayerItem(url: localURL)
+                let playerItem = AVPlayerItem(url: cachedURL)
                 let player = AVPlayer(playerItem: playerItem)
 
                 await MainActor.run {
                     useWebViewForVideo = false
                     videoPlayer = player
-                    videoURL = localURL
+                    videoURL = cachedURL
                     hasLoadedMedia = true
                 }
             } else if let url = await mediaItem.loadVideoURL() {

@@ -2,8 +2,10 @@
 //  MediaDownloadManager.swift
 //  MediaStream
 //
-//  Manages downloading and caching media files locally for background playback.
-//  Files are stored UNENCRYPTED because AVPlayer needs direct file access in background.
+//  Manages downloading and caching media files locally.
+//  When MediaStreamConfiguration.encryptDownloads is true, files are stored encrypted
+//  using the configured encryptionProvider, and background playback is not supported.
+//  When encryption is off, files are stored unencrypted for AVPlayer background access.
 //
 
 import Foundation
@@ -57,7 +59,8 @@ public enum DownloadState: Equatable, Sendable {
 }
 
 /// Singleton manager for downloading and caching media files locally.
-/// Files are stored UNENCRYPTED for AVPlayer background access.
+/// When encryptDownloads is false (default): files stored unencrypted for AVPlayer background access.
+/// When encryptDownloads is true: files stored encrypted with .enc extension; no background playback.
 @MainActor
 public final class MediaDownloadManager: ObservableObject {
 
@@ -73,10 +76,19 @@ public final class MediaDownloadManager: ObservableObject {
     // MARK: - Storage
 
     private let fileManager = FileManager.default
-    private let downloadDirectory: URL
+
+    /// The directory where downloaded media files are stored.
+    /// Files are named `{cacheKey}.{ext}` or `{cacheKey}.{ext}.enc` when encrypted.
+    public let downloadDirectory: URL
+
+    /// Suffix appended to encrypted download files
+    private static let encryptedSuffix = "enc"
 
     /// Active download task (cancellable)
     private var downloadTask: Task<Void, Never>?
+
+    /// Temp files created for decrypted playback - cleaned up on next access or clearAllDownloads
+    private var tempPlaybackFiles: [URL] = []
 
     /// URLSession for downloads
     private lazy var urlSession: URLSession = {
@@ -91,13 +103,13 @@ public final class MediaDownloadManager: ObservableObject {
     private init() {
         // Use Caches directory for downloaded media
         // ~/Library/Caches/MediaStream/DownloadedMedia/
-        let cachesDir = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         downloadDirectory = cachesDir
             .appendingPathComponent("MediaStream", isDirectory: true)
             .appendingPathComponent("DownloadedMedia", isDirectory: true)
 
         // Create directory if it doesn't exist
-        try? fileManager.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
     }
 
     // MARK: - Public API
@@ -125,22 +137,66 @@ public final class MediaDownloadManager: ObservableObject {
         return items.filter { isCached(mediaItem: $0) }.count
     }
 
-    /// Get the local file URL for a cached media item
+    /// Get the local file URL for a cached media item.
+    /// Returns a URL with `.enc` extension when encryptDownloads is true.
+    /// Use `playbackURL(for:)` to get a URL usable by AVPlayer.
     public func localURL(for mediaItem: any MediaItem) -> URL? {
         guard let cacheKey = mediaItem.diskCacheKey else { return nil }
 
-        // Get file extension from sourceURL or diskCacheKey
         let ext = fileExtension(for: mediaItem)
-        let filename = "\(cacheKey).\(ext)"
+        if MediaStreamConfiguration.encryptDownloads {
+            let filename = "\(cacheKey).\(ext).\(MediaDownloadManager.encryptedSuffix)"
+            return downloadDirectory.appendingPathComponent(filename)
+        } else {
+            let filename = "\(cacheKey).\(ext)"
+            return downloadDirectory.appendingPathComponent(filename)
+        }
+    }
 
-        return downloadDirectory.appendingPathComponent(filename)
+    /// Get a URL suitable for AVPlayer playback.
+    /// When encryptDownloads is true, decrypts the file to a temporary location.
+    /// When encryptDownloads is false, returns the local URL directly.
+    /// Returns nil if the file is not cached or decryption fails.
+    public func playbackURL(for mediaItem: any MediaItem) async -> URL? {
+        guard let fileURL = localURL(for: mediaItem) else { return nil }
+        guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
+
+        // Not encrypted — return directly
+        guard MediaStreamConfiguration.encryptDownloads,
+              let provider = MediaStreamConfiguration.encryptionProvider else {
+            return fileURL
+        }
+
+        // Decrypt to a temp file for playback
+        do {
+            let encryptedData = try Data(contentsOf: fileURL)
+            let decryptedData = try provider.decrypt(encryptedData)
+
+            // Determine original extension (filename is {cacheKey}.{ext}.enc)
+            let originalExt = fileURL.deletingPathExtension().pathExtension
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ms_play_\(UUID().uuidString)")
+                .appendingPathExtension(originalExt)
+
+            try decryptedData.write(to: tempURL)
+
+            // Track temp file for cleanup
+            tempPlaybackFiles.append(tempURL)
+            pruneOldTempFiles()
+
+            print("[MediaDownloadManager] Decrypted to temp for playback: \(tempURL.lastPathComponent)")
+            return tempURL
+        } catch {
+            print("[MediaDownloadManager] Failed to decrypt for playback: \(error)")
+            return nil
+        }
     }
 
     /// Check if a media item can be cached (has diskCacheKey and is video/audio)
     /// Note: sourceURL may be loaded asynchronously, so we only check diskCacheKey here
     public func canCache(_ mediaItem: any MediaItem) -> Bool {
         guard mediaItem.diskCacheKey != nil else { return false }
-        // Only cache video and audio for background playback
+        // Only cache video and audio for local playback
         return mediaItem.type == .video || mediaItem.type == .audio
     }
 
@@ -266,6 +322,7 @@ public final class MediaDownloadManager: ObservableObject {
     /// Clear all downloaded media files
     public func clearAllDownloads() {
         cancelDownload()
+        cleanupTempPlaybackFiles()
 
         do {
             try fileManager.removeItem(at: downloadDirectory)
@@ -292,6 +349,75 @@ public final class MediaDownloadManager: ObservableObject {
         }
     }
 
+    /// Migrate existing downloaded files when the encryptDownloads setting changes.
+    /// When enabling encryption: encrypts all plain files and renames with .enc extension.
+    /// When disabling encryption: decrypts all .enc files and removes the extension.
+    /// - Parameter encrypt: true to encrypt existing plain files, false to decrypt .enc files
+    public func migrateEncryption(encrypt: Bool) async {
+        guard let provider = MediaStreamConfiguration.encryptionProvider else {
+            print("[MediaDownloadManager] Cannot migrate: no encryptionProvider configured")
+            return
+        }
+
+        print("[MediaDownloadManager] Starting download migration — encrypt: \(encrypt)")
+        var migratedCount = 0
+        var failedCount = 0
+
+        guard let enumerator = fileManager.enumerator(
+            at: downloadDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        // Collect URLs first to avoid mutating directory while enumerating
+        var fileURLs: [URL] = []
+        while let fileURL = enumerator.nextObject() as? URL {
+            fileURLs.append(fileURL)
+        }
+
+        for fileURL in fileURLs {
+            let isEncrypted = fileURL.pathExtension.lowercased() == MediaDownloadManager.encryptedSuffix
+
+            if encrypt && !isEncrypted {
+                // Encrypt plain file: read → encrypt → write .enc → remove original
+                do {
+                    let rawData = try Data(contentsOf: fileURL)
+                    let encryptedData = try provider.encrypt(rawData)
+                    let destURL = fileURL.appendingPathExtension(MediaDownloadManager.encryptedSuffix)
+                    try encryptedData.write(to: destURL, options: .atomic)
+                    try fileManager.removeItem(at: fileURL)
+                    migratedCount += 1
+                } catch {
+                    print("[MediaDownloadManager] Failed to encrypt \(fileURL.lastPathComponent): \(error)")
+                    failedCount += 1
+                }
+            } else if !encrypt && isEncrypted {
+                // Decrypt .enc file: read → decrypt → write without .enc → remove original
+                do {
+                    let encryptedData = try Data(contentsOf: fileURL)
+                    let decryptedData = try provider.decrypt(encryptedData)
+                    let destURL = fileURL.deletingPathExtension() // removes .enc
+                    try decryptedData.write(to: destURL, options: .atomic)
+                    try fileManager.removeItem(at: fileURL)
+                    migratedCount += 1
+                } catch {
+                    print("[MediaDownloadManager] Failed to decrypt \(fileURL.lastPathComponent): \(error)")
+                    failedCount += 1
+                }
+            }
+        }
+
+        print("[MediaDownloadManager] Migration complete: \(migratedCount) files migrated, \(failedCount) failed")
+    }
+
+    /// Remove temp decryption files created for playback
+    public func cleanupTempPlaybackFiles() {
+        for url in tempPlaybackFiles {
+            try? fileManager.removeItem(at: url)
+        }
+        tempPlaybackFiles.removeAll()
+    }
+
     /// Get current cache statistics
     public var stats: (fileCount: Int, diskMB: Double) {
         var totalSize: Int64 = 0
@@ -315,7 +441,7 @@ public final class MediaDownloadManager: ObservableObject {
 
     // MARK: - Private Helpers
 
-    /// Download a single file
+    /// Download a single file, encrypting it if encryptDownloads is true
     private func downloadFile(
         item: any MediaItem,
         sourceURL: URL,
@@ -351,12 +477,22 @@ public final class MediaDownloadManager: ObservableObject {
             }
         }
 
-        // Move to final destination
-        // Remove any existing file first
+        // Encrypt if needed, then move to final destination
         try? fileManager.removeItem(at: destinationURL)
-        try fileManager.moveItem(at: tempURL, to: destinationURL)
 
-        print("[MediaDownloadManager] Downloaded: \(destinationURL.lastPathComponent)")
+        if MediaStreamConfiguration.encryptDownloads,
+           let provider = MediaStreamConfiguration.encryptionProvider {
+            // Read downloaded data, encrypt it, write encrypted file
+            let rawData = try Data(contentsOf: tempURL)
+            try? fileManager.removeItem(at: tempURL)
+            let encryptedData = try provider.encrypt(rawData)
+            try encryptedData.write(to: destinationURL, options: .atomic)
+            print("[MediaDownloadManager] Downloaded and encrypted: \(destinationURL.lastPathComponent)")
+        } else {
+            // Store unencrypted
+            try fileManager.moveItem(at: tempURL, to: destinationURL)
+            print("[MediaDownloadManager] Downloaded: \(destinationURL.lastPathComponent)")
+        }
     }
 
     /// Get file extension for a media item
@@ -380,6 +516,16 @@ public final class MediaDownloadManager: ObservableObject {
         case .animatedImage:
             return "gif"
         }
+    }
+
+    /// Keep only the most recent N temp playback files to avoid unbounded growth
+    private func pruneOldTempFiles(keepLast: Int = 3) {
+        guard tempPlaybackFiles.count > keepLast else { return }
+        let toRemove = tempPlaybackFiles.dropLast(keepLast)
+        for url in toRemove {
+            try? fileManager.removeItem(at: url)
+        }
+        tempPlaybackFiles = Array(tempPlaybackFiles.suffix(keepLast))
     }
 }
 

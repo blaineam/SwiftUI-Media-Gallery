@@ -181,6 +181,19 @@ public enum MediaStreamConfiguration {
     /// ```
     public static var encryptionProvider: MediaStreamEncryptionProvider?
 
+    /// Whether to encrypt downloaded media files at rest using the configured encryptionProvider.
+    /// When true, files are stored encrypted on disk and background audio/video playback is not supported.
+    /// Background playback requires direct unencrypted file access by AVPlayer.
+    /// Must set backgroundAudioEnabled = false when this is true.
+    @MainActor
+    public static var encryptDownloads: Bool = false
+
+    /// Whether background audio playback (mini player, lock screen controls) is enabled.
+    /// Set to false when encryptDownloads is true.
+    /// When false, media pauses when the app is backgrounded.
+    @MainActor
+    public static var backgroundAudioEnabled: Bool = true
+
     /// Closure type for loading a saved playback position for a media item.
     /// Returns the saved position in seconds, or nil if no saved position exists.
     public typealias PositionProvider = @Sendable (any MediaItem) async -> Double?
