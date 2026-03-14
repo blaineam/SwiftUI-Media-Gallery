@@ -239,6 +239,15 @@ public final class MediaPlaybackService: NSObject, ObservableObject {
     ///   - mediaId: Optional media item ID for lookup during track changes
     public func registerExternalPlayer(_ player: AVPlayer, forMediaId mediaId: UUID? = nil) {
         let id = ObjectIdentifier(player)
+
+        // Skip if this exact player is already registered — called every 0.5s from the
+        // periodic time observer, so guard against redundant work and log spam.
+        let alreadyRegistered = registeredPlayers[id] != nil
+        let mediaAlreadyMapped = mediaId.map { playersByMediaId[$0] === player } ?? true
+        if alreadyRegistered && mediaAlreadyMapped && externalPlayer === player {
+            return
+        }
+
         registeredPlayers[id] = player
         externalPlayer = player
 
