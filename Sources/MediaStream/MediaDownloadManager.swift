@@ -195,12 +195,12 @@ public final class MediaDownloadManager: ObservableObject {
         }
     }
 
-    /// Check if a media item can be cached (has diskCacheKey and is video/audio)
-    /// Note: sourceURL may be loaded asynchronously, so we only check diskCacheKey here
+    /// Check if a media item can be cached (has diskCacheKey).
+    /// All types (image, video, audio) are supported; animated images are excluded
+    /// only when the item itself returns nil from diskCacheKey.
+    /// Note: sourceURL may be loaded asynchronously, so we only check diskCacheKey here.
     public func canCache(_ mediaItem: any MediaItem) -> Bool {
-        guard mediaItem.diskCacheKey != nil else { return false }
-        // Only cache video and audio for local playback
-        return mediaItem.type == .video || mediaItem.type == .audio
+        return mediaItem.diskCacheKey != nil
     }
 
     /// Download all media items that support caching
@@ -251,6 +251,9 @@ public final class MediaDownloadManager: ObservableObject {
                     sourceURL = await item.loadVideoURL()
                 } else if item.type == .audio {
                     sourceURL = await item.loadAudioURL()
+                } else if item.type == .image || item.type == .animatedImage {
+                    // loadImageURL() returns a file:// URL (decrypted to temp for private items)
+                    sourceURL = await item.loadImageURL()
                 } else {
                     sourceURL = nil
                 }

@@ -276,6 +276,12 @@ public protocol MediaItem: Identifiable, Sendable {
     /// Load the video URL (for video type only)
     func loadVideoURL() async -> URL?
 
+    /// Load the image as a local file URL for download caching.
+    /// For non-private items this can return sourceURL or the on-disk path.
+    /// For private (encrypted) items return a decrypted temporary file URL.
+    /// Return nil to fall back to in-memory loadImage() encoding (lossy for JPEG).
+    func loadImageURL() async -> URL?
+
     /// Get the URL for an animated image (for streaming large GIFs)
     /// Return nil to use loadImage() instead (which loads all frames into memory)
     func loadAnimatedImageURL() async -> URL?
@@ -337,6 +343,14 @@ extension MediaItem {
 
     /// Default: no raw data available
     public func loadAnimatedImageData() async -> Data? { nil }
+}
+
+// MARK: - Default loadImageURL Implementation
+
+extension MediaItem {
+    /// Default: use sourceURL when available (works for unencrypted file-backed items).
+    /// Override in encrypted or non-file items to provide decrypted temporary file access.
+    public func loadImageURL() async -> URL? { sourceURL }
 }
 
 // MARK: - Default Audio Implementation
