@@ -501,7 +501,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
         <!DOCTYPE html>
         <html>
         <head>
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src * blob: file:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none';">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src * blob: file:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none';">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
             <meta name="color-scheme" content="light dark">
             <style>
@@ -770,7 +770,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
                 const aspectRatio = v.videoWidth / v.videoHeight;
 
                 canvas.width = targetWidth;
-                canvas.height = Math.round(targetWidth / aspectRatio);
+                canvas.height = Math.max(1, Math.min(Math.round(targetWidth / aspectRatio), 4096)) || targetWidth;
 
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
@@ -1028,11 +1028,11 @@ public class WebViewVideoController: NSObject, ObservableObject {
                         if (!v) return { error: 'no_element' };
                         if (v.readyState < 2) return { error: 'not_ready', readyState: v.readyState };
 
-                        const targetWidth = \(Int(targetSize));
+                        const targetWidth = \(max(1, min(Int(targetSize), 4096)));
                         const canvas = document.createElement('canvas');
                         const aspectRatio = v.videoWidth / v.videoHeight;
                         canvas.width = targetWidth;
-                        canvas.height = Math.round(targetWidth / aspectRatio);
+                        canvas.height = Math.max(1, Math.min(Math.round(targetWidth / aspectRatio), 4096)) || targetWidth;
 
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
