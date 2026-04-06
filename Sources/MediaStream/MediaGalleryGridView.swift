@@ -1134,15 +1134,16 @@ struct LazyThumbnailView: View {
                     return
                 }
 
+                let isPlaceholderResult = isFallback
                 if let thumb = thumb {
                     // Cache real thumbnails (skip caching placeholders — they regenerate instantly)
-                    if !isFallback {
+                    if !isPlaceholderResult {
                         ThumbnailCache.shared.set(mediaItem.id, image: thumb, diskCacheKey: diskCacheKey)
                     }
 
                     await MainActor.run {
                         self.thumbnail = thumb
-                        self.isPlaceholder = isFallback
+                        self.isPlaceholder = isPlaceholderResult
                         self.isLoading = false
                         // If type changed (e.g., webp/heic resolved from .image → .animatedImage),
                         // notify the parent grid to re-check media types and re-filter.
