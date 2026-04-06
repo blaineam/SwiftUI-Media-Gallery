@@ -389,7 +389,9 @@ public class WebViewVideoController: NSObject, ObservableObject {
                 try? FileManager.default.removeItem(at: htmlFile)
             }
         } catch {
+            #if DEBUG
             print("WebViewVideoPlayer: Failed to write HTML to video directory, trying temp: \(error)")
+            #endif
             // Fallback: try temp directory with broader access
             loadLocalVideoFallback(url: url, webView: webView)
         }
@@ -418,7 +420,9 @@ public class WebViewVideoController: NSObject, ObservableObject {
                 try? FileManager.default.removeItem(at: htmlFile)
             }
         } catch {
+            #if DEBUG
             print("WebViewVideoPlayer: Failed to create temp HTML: \(error)")
+            #endif
         }
     }
 
@@ -1205,11 +1209,15 @@ extension WebViewVideoController: WKNavigationDelegate {
     }
 
     nonisolated public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        #if DEBUG
         print("WebViewVideoPlayer: Navigation failed - \(error.localizedDescription)")
+        #endif
     }
 
     nonisolated public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        #if DEBUG
         print("WebViewVideoPlayer: Provisional navigation failed - \(error.localizedDescription)")
+        #endif
     }
 
     /// Handle HTTP Basic Auth challenges for video requests

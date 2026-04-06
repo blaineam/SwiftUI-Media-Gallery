@@ -187,10 +187,16 @@ public final class MediaDownloadManager: ObservableObject {
             tempPlaybackFiles.append(tempURL)
             pruneOldTempFiles()
 
+            #if DEBUG
             print("[MediaDownloadManager] Decrypted to temp for playback: \(tempURL.lastPathComponent)")
+            #endif
             return tempURL
         } catch {
+            // Clean up the temp file if it was partially written
+            try? FileManager.default.removeItem(at: tempURL)
+            #if DEBUG
             print("[MediaDownloadManager] Failed to decrypt for playback: \(error)")
+            #endif
             return nil
         }
     }
@@ -210,7 +216,9 @@ public final class MediaDownloadManager: ObservableObject {
     ) async {
         // Don't start a new download if one is already in progress
         if case .downloading = downloadState {
+            #if DEBUG
             print("[MediaDownloadManager] Download already in progress, ignoring request")
+            #endif
             return
         }
 
@@ -266,7 +274,9 @@ public final class MediaDownloadManager: ObservableObject {
                 }
 
                 guard let sourceURL = sourceURL else {
+                    #if DEBUG
                     print("[MediaDownloadManager] No URL available for item: \(item.id)")
+                    #endif
                     completedCount += 1
                     continue
                 }
@@ -313,7 +323,9 @@ public final class MediaDownloadManager: ObservableObject {
                         progress = nil
                         return
                     }
+                    #if DEBUG
                     print("[MediaDownloadManager] Failed to download \(itemName): \(error)")
+                    #endif
                     completedCount += 1  // Continue with next item
                     downloadState = .downloading(completed: completedCount, total: itemsToDownload.count)
                     // Clean up even on failure
@@ -349,9 +361,13 @@ public final class MediaDownloadManager: ObservableObject {
             try fileManager.removeItem(at: downloadDirectory)
             try fileManager.createDirectory(at: downloadDirectory, withIntermediateDirectories: true)
             downloadState = .idle
+            #if DEBUG
             print("[MediaDownloadManager] Cleared all downloads")
+            #endif
         } catch {
+            #if DEBUG
             print("[MediaDownloadManager] Failed to clear downloads: \(error)")
+            #endif
         }
     }
 
@@ -376,11 +392,15 @@ public final class MediaDownloadManager: ObservableObject {
     /// - Parameter encrypt: true to encrypt existing plain files, false to decrypt .enc files
     public func migrateEncryption(encrypt: Bool) async {
         guard let provider = MediaStreamConfiguration.encryptionProvider else {
+            #if DEBUG
             print("[MediaDownloadManager] Cannot migrate: no encryptionProvider configured")
+            #endif
             return
         }
 
+        #if DEBUG
         print("[MediaDownloadManager] Starting download migration — encrypt: \(encrypt)")
+        #endif
         var migratedCount = 0
         var failedCount = 0
 
@@ -410,14 +430,18 @@ public final class MediaDownloadManager: ObservableObject {
                     guard fileManager.fileExists(atPath: destURL.path),
                           let attrs = try? fileManager.attributesOfItem(atPath: destURL.path),
                           let size = attrs[.size] as? UInt64, size > 0 else {
+                        #if DEBUG
                         print("[MediaDownloadManager] Verification failed for \(destURL.lastPathComponent), keeping original")
+                        #endif
                         failedCount += 1
                         continue
                     }
                     try fileManager.removeItem(at: fileURL)
                     migratedCount += 1
                 } catch {
+                    #if DEBUG
                     print("[MediaDownloadManager] Failed to encrypt \(fileURL.lastPathComponent): \(error)")
+                    #endif
                     failedCount += 1
                 }
             } else if !encrypt && isEncrypted {
@@ -431,20 +455,26 @@ public final class MediaDownloadManager: ObservableObject {
                     guard fileManager.fileExists(atPath: destURL.path),
                           let attrs = try? fileManager.attributesOfItem(atPath: destURL.path),
                           let size = attrs[.size] as? UInt64, size > 0 else {
+                        #if DEBUG
                         print("[MediaDownloadManager] Verification failed for \(destURL.lastPathComponent), keeping original")
+                        #endif
                         failedCount += 1
                         continue
                     }
                     try fileManager.removeItem(at: fileURL)
                     migratedCount += 1
                 } catch {
+                    #if DEBUG
                     print("[MediaDownloadManager] Failed to decrypt \(fileURL.lastPathComponent): \(error)")
+                    #endif
                     failedCount += 1
                 }
             }
         }
 
+        #if DEBUG
         print("[MediaDownloadManager] Migration complete: \(migratedCount) files migrated, \(failedCount) failed")
+        #endif
     }
 
     /// Remove temp decryption files created for playback
@@ -471,7 +501,9 @@ public final class MediaDownloadManager: ObservableObject {
                 count += 1
             }
         }
+        #if DEBUG
         print("[MediaDownloadManager] Cleared \(count) encrypted download files")
+        #endif
     }
 
     /// Get current cache statistics
@@ -524,13 +556,17 @@ public final class MediaDownloadManager: ObservableObject {
                     return try provider.encrypt(rawData)
                 }.value
                 try encryptedData.write(to: destinationURL, options: .atomic)
+                #if DEBUG
                 print("[MediaDownloadManager] Copied and encrypted local file: \(destinationURL.lastPathComponent)")
+                #endif
             } else {
                 try await Task.detached(priority: .userInitiated) {
                     let rawData = try Data(contentsOf: sourceURL)
                     try rawData.write(to: destinationURL, options: .atomic)
                 }.value
+                #if DEBUG
                 print("[MediaDownloadManager] Copied local file: \(destinationURL.lastPathComponent)")
+                #endif
             }
             return
         }
@@ -567,11 +603,15 @@ public final class MediaDownloadManager: ObservableObject {
             }.value
             try? fileManager.removeItem(at: tempURL)
             try encryptedData.write(to: destinationURL, options: .atomic)
+            #if DEBUG
             print("[MediaDownloadManager] Downloaded and encrypted: \(destinationURL.lastPathComponent)")
+            #endif
         } else {
             // Store unencrypted
             try fileManager.moveItem(at: tempURL, to: destinationURL)
+            #if DEBUG
             print("[MediaDownloadManager] Downloaded: \(destinationURL.lastPathComponent)")
+            #endif
         }
     }
 

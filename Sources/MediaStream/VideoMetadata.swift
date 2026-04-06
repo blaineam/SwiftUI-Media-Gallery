@@ -55,11 +55,15 @@ public enum VideoMetadata {
 
             // Check for valid duration
             if !seconds.isNaN && !seconds.isInfinite && seconds > 0 {
+                #if DEBUG
                 print("VideoMetadata: AVFoundation duration for \(url.lastPathComponent): \(seconds)s")
+                #endif
                 return seconds
             }
         } catch {
+            #if DEBUG
             print("VideoMetadata: AVFoundation failed for \(url.lastPathComponent): \(error.localizedDescription)")
+            #endif
         }
 
         // Fall back to WebView for unsupported formats (WebM, etc.)
@@ -99,12 +103,16 @@ public enum VideoMetadata {
         do {
             let audioTracks = try await asset.loadTracks(withMediaType: .audio)
             if !audioTracks.isEmpty {
+                #if DEBUG
                 print("VideoMetadata: AVFoundation found audio tracks for \(url.lastPathComponent)")
+                #endif
                 return true
             }
             // AVFoundation found no audio - but for some formats it may not detect correctly
         } catch {
+            #if DEBUG
             print("VideoMetadata: AVFoundation audio check failed for \(url.lastPathComponent): \(error.localizedDescription)")
+            #endif
         }
 
         // Fall back to WebView for unsupported formats (WebM, etc.)
