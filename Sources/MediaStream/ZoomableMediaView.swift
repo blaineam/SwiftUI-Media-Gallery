@@ -2350,7 +2350,7 @@ struct ZoomableMediaView: View {
                 let ext = Self.detectAnimatedImageExtension(from: data)
                 let tempURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("webview_animated_\(UUID().uuidString).\(ext)")
-                try? data.write(to: tempURL)
+                try? data.write(to: tempURL, options: [.atomic, .completeFileProtection])
 
                 animatedImageURL = tempURL
                 useWebViewForAnimatedImage = true
@@ -2434,7 +2434,7 @@ struct ZoomableMediaView: View {
                 let ext = Self.detectAnimatedImageExtension(from: data)
                 let tempURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("webview_animated_\(UUID().uuidString).\(ext)")
-                try? data.write(to: tempURL)
+                try? data.write(to: tempURL, options: [.atomic, .completeFileProtection])
 
                 animatedImageURL = tempURL
                 useWebViewForAnimatedImage = true
