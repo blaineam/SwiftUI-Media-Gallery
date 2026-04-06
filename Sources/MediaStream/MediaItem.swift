@@ -213,16 +213,29 @@ public enum MediaStreamConfiguration {
 
     /// Get headers for a URL using the configured provider
     public static func headers(for url: URL) -> [String: String]? {
-        return MainActor.assumeIsolated {
+        let raw = MainActor.assumeIsolated {
             headerProvider?(url)
+        }
+        return sanitizedHeaders(raw)
+    }
+
+    /// Sanitize HTTP header values by rejecting entries that contain
+    /// CR/LF or other control characters that could enable header injection.
+    public static func sanitizedHeaders(_ headers: [String: String]?) -> [String: String]? {
+        guard let headers = headers else { return nil }
+        return headers.filter { key, value in
+            let forbidden = CharacterSet.controlCharacters
+            return key.unicodeScalars.allSatisfy { !forbidden.contains($0) }
+                && value.unicodeScalars.allSatisfy { !forbidden.contains($0) }
         }
     }
 
     /// Async version for contexts where we're not on main actor
     public static func headersAsync(for url: URL) async -> [String: String]? {
-        return await MainActor.run {
+        let raw = await MainActor.run {
             headerProvider?(url)
         }
+        return sanitizedHeaders(raw)
     }
 
     /// Get credentials for a URL using the configured provider

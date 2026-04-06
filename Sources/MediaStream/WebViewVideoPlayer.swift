@@ -264,7 +264,8 @@ public class WebViewVideoController: NSObject, ObservableObject {
         #endif
 
         // Also update the HTML body background via JS
-        let hexColor = backgroundColor.hexString
+        // Sanitize the color string to prevent JS injection — only allow hex color characters
+        let hexColor = backgroundColor.hexString.filter { $0.isHexDigit || $0 == "#" }
         webView?.evaluateJavaScript("document.body.style.background = '\(hexColor)'; document.querySelector('video').style.background = '\(hexColor)';")
     }
 
@@ -377,6 +378,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
 
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
+            try? (htmlFile as NSURL).setResourceValue(URLFileProtection.complete, forKey: .fileProtectionKey)
 
             // Load the HTML file with access to the video's directory (which now contains both)
             webView.loadFileURL(htmlFile, allowingReadAccessTo: videoDirectory)
@@ -395,6 +397,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
 
     /// Fallback for when we can't write to the video's directory
     private func loadLocalVideoFallback(url: URL, webView: WKWebView) {
+        let videoDirectory = url.deletingLastPathComponent()
         let tempDir = FileManager.default.temporaryDirectory
         let htmlFile = tempDir.appendingPathComponent("video_player_\(UUID().uuidString).html")
 
@@ -403,10 +406,12 @@ public class WebViewVideoController: NSObject, ObservableObject {
 
         do {
             try html.write(to: htmlFile, atomically: true, encoding: .utf8)
+            try? (htmlFile as NSURL).setResourceValue(URLFileProtection.complete, forKey: .fileProtectionKey)
 
-            // Grant access to root to allow reading both the HTML and video
-            let rootAccess = URL(fileURLWithPath: "/")
-            webView.loadFileURL(htmlFile, allowingReadAccessTo: rootAccess)
+            // Find the common ancestor directory of the temp HTML and the video file
+            // to grant the narrowest possible read access (never grant access to "/")
+            let commonAncestor = Self.commonAncestorDirectory(of: tempDir, and: videoDirectory)
+            webView.loadFileURL(htmlFile, allowingReadAccessTo: commonAncestor)
 
             Task {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
@@ -415,6 +420,29 @@ public class WebViewVideoController: NSObject, ObservableObject {
         } catch {
             print("WebViewVideoPlayer: Failed to create temp HTML: \(error)")
         }
+    }
+
+    /// Find the deepest common ancestor directory of two paths
+    private static func commonAncestorDirectory(of a: URL, and b: URL) -> URL {
+        let aComponents = a.standardizedFileURL.pathComponents
+        let bComponents = b.standardizedFileURL.pathComponents
+        var common: [String] = []
+        for (ac, bc) in zip(aComponents, bComponents) {
+            if ac == bc {
+                common.append(ac)
+            } else {
+                break
+            }
+        }
+        if common.isEmpty {
+            // Last resort: use the temp directory itself rather than "/"
+            return FileManager.default.temporaryDirectory
+        }
+        var result = URL(fileURLWithPath: common.first ?? "/")
+        for component in common.dropFirst() {
+            result = result.appendingPathComponent(component)
+        }
+        return result
     }
 
     /// Load a remote video - uses direct URL in HTML5 video element
@@ -428,18 +456,31 @@ public class WebViewVideoController: NSObject, ObservableObject {
         webView.loadHTMLString(html, baseURL: baseURL)
     }
 
+    /// Escape a string for safe inclusion in an HTML attribute value
+    private static func escapeHTMLAttribute(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
     /// Build minimal HTML for video playback
     private func buildVideoHTML(videoURL: URL, headers: [String: String]?, useRelativePath: Bool = false) -> String {
         // For local files loaded via loadFileURL, use relative path (just filename)
         // For remote URLs, use the full URL
-        let videoURLString: String
+        let rawVideoURLString: String
 
         if useRelativePath {
             // URL encode the filename for safety
-            videoURLString = videoURL.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? videoURL.lastPathComponent
+            rawVideoURLString = videoURL.lastPathComponent.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? videoURL.lastPathComponent
         } else {
-            videoURLString = videoURL.absoluteString
+            rawVideoURLString = videoURL.absoluteString
         }
+
+        // HTML-escape to prevent injection via crafted URLs
+        let videoURLString = Self.escapeHTMLAttribute(rawVideoURLString)
 
         // Determine MIME type based on extension
         let ext = videoURL.pathExtension.lowercased()
@@ -456,6 +497,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
         <!DOCTYPE html>
         <html>
         <head>
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src * blob: file:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none';">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
             <meta name="color-scheme" content="light dark">
             <style>
@@ -643,8 +685,9 @@ public class WebViewVideoController: NSObject, ObservableObject {
     }
 
     public func seek(to time: Double) {
-        webView?.evaluateJavaScript("window.videoSeek(\(time))")
-        currentTime = time
+        let safeTime = time.isFinite ? max(0, time) : 0
+        webView?.evaluateJavaScript("window.videoSeek(\(safeTime))")
+        currentTime = safeTime
         didReachEnd = false
     }
 
@@ -653,8 +696,9 @@ public class WebViewVideoController: NSObject, ObservableObject {
     }
 
     public func setVolume(_ volume: Float) {
-        volumeLevel = volume
-        webView?.evaluateJavaScript("window.videoSetVolume(\(volume))")
+        let safeVolume = volume.isFinite ? max(0, min(1, volume)) : 1
+        volumeLevel = safeVolume
+        webView?.evaluateJavaScript("window.videoSetVolume(\(safeVolume))")
     }
 
     public func setMuted(_ muted: Bool) {
@@ -718,7 +762,7 @@ public class WebViewVideoController: NSObject, ObservableObject {
                 if (v.readyState < 2) return { error: 'not_ready', readyState: v.readyState };
 
                 const canvas = document.createElement('canvas');
-                const targetWidth = \(Int(size.width));
+                const targetWidth = \(max(1, min(Int(size.width), 4096)));
                 const aspectRatio = v.videoWidth / v.videoHeight;
 
                 canvas.width = targetWidth;

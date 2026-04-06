@@ -180,7 +180,7 @@ public final class MediaDownloadManager: ObservableObject {
             try await Task.detached(priority: .userInitiated) {
                 let encryptedData = try Data(contentsOf: fileURL)
                 let decryptedData = try provider.decrypt(encryptedData)
-                try decryptedData.write(to: tempURL)
+                try decryptedData.write(to: tempURL, options: [.atomic, .completeFileProtection])
             }.value
 
             // Track temp file for cleanup (back on main actor)
@@ -400,12 +400,20 @@ public final class MediaDownloadManager: ObservableObject {
             let isEncrypted = fileURL.pathExtension.lowercased() == MediaDownloadManager.encryptedSuffix
 
             if encrypt && !isEncrypted {
-                // Encrypt plain file: read → encrypt → write .enc → remove original
+                // Encrypt plain file: read → encrypt → write .enc → verify → remove original
                 do {
                     let rawData = try Data(contentsOf: fileURL)
                     let encryptedData = try provider.encrypt(rawData)
                     let destURL = fileURL.appendingPathExtension(MediaDownloadManager.encryptedSuffix)
-                    try encryptedData.write(to: destURL, options: .atomic)
+                    try encryptedData.write(to: destURL, options: [.atomic, .completeFileProtection])
+                    // Verify the new file exists and has data before removing the original
+                    guard fileManager.fileExists(atPath: destURL.path),
+                          let attrs = try? fileManager.attributesOfItem(atPath: destURL.path),
+                          let size = attrs[.size] as? UInt64, size > 0 else {
+                        print("[MediaDownloadManager] Verification failed for \(destURL.lastPathComponent), keeping original")
+                        failedCount += 1
+                        continue
+                    }
                     try fileManager.removeItem(at: fileURL)
                     migratedCount += 1
                 } catch {
@@ -413,12 +421,20 @@ public final class MediaDownloadManager: ObservableObject {
                     failedCount += 1
                 }
             } else if !encrypt && isEncrypted {
-                // Decrypt .enc file: read → decrypt → write without .enc → remove original
+                // Decrypt .enc file: read → decrypt → write without .enc → verify → remove original
                 do {
                     let encryptedData = try Data(contentsOf: fileURL)
                     let decryptedData = try provider.decrypt(encryptedData)
                     let destURL = fileURL.deletingPathExtension() // removes .enc
                     try decryptedData.write(to: destURL, options: .atomic)
+                    // Verify the new file exists and has data before removing the original
+                    guard fileManager.fileExists(atPath: destURL.path),
+                          let attrs = try? fileManager.attributesOfItem(atPath: destURL.path),
+                          let size = attrs[.size] as? UInt64, size > 0 else {
+                        print("[MediaDownloadManager] Verification failed for \(destURL.lastPathComponent), keeping original")
+                        failedCount += 1
+                        continue
+                    }
                     try fileManager.removeItem(at: fileURL)
                     migratedCount += 1
                 } catch {
@@ -523,8 +539,8 @@ public final class MediaDownloadManager: ObservableObject {
         let headers = await headerProvider(sourceURL)
 
         var request = URLRequest(url: sourceURL)
-        if let headers = headers {
-            for (key, value) in headers {
+        if let sanitized = MediaStreamConfiguration.sanitizedHeaders(headers) {
+            for (key, value) in sanitized {
                 request.setValue(value, forHTTPHeaderField: key)
             }
         }

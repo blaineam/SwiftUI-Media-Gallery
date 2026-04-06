@@ -22,9 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate semver format
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ ]]; then
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ ]]; then
             echo "Error: Version '$VERSION' does not follow semantic versioning"
             echo "Expected format: MAJOR.MINOR.PATCH[-prerelease][+build]"
             exit 1
@@ -81,21 +82,26 @@ jobs:
           fetch-depth: 0
 
       - name: Check if tag exists
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          if git rev-parse "v${{ github.event.inputs.version }}" >/dev/null 2>&1; then
-            echo "Error: Tag v${{ github.event.inputs.version }} already exists"
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Error: Tag v${VERSION} already exists"
             exit 1
           fi
 
       - name: Generate Release Notes
         id: release_notes
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          GH_REPOSITORY: ${{ github.repository }}
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
           if [ -z "$PREV_TAG" ]; then
             COMMITS=$(git log --oneline --no-decorate)
           else
-            COMMITS=$(git log ${PREV_TAG}..HEAD --oneline --no-decorate)
+            COMMITS=$(git log "${PREV_TAG}..HEAD" --oneline --no-decorate)
           fi
 
           {
@@ -106,19 +112,21 @@ jobs:
               echo "- $line"
             done
             echo ""
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG:-$(git rev-list --max-parents=0 HEAD | head -1)}...v${{ github.event.inputs.version }}"
+            echo "**Full Changelog**: https://github.com/${GH_REPOSITORY}/compare/${PREV_TAG:-$(git rev-list --max-parents=0 HEAD | head -1)}...v${VERSION}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create Git Tag
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag -a "v${{ github.event.inputs.version }}" -m "Release v${{ github.event.inputs.version }}"
-          git push origin "v${{ github.event.inputs.version }}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c95fe1489396fe187066b4e7ed2388e4f1941220 # v2
         with:
           tag_name: v${{ github.event.inputs.version }}
           name: v${{ github.event.inputs.version }}
