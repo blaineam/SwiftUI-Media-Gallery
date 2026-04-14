@@ -64,12 +64,25 @@ private class GestureBlockerView: UIView {
     }
 
     private func setupGesture() {
-        let pan = UIPanGestureRecognizer(target: nil, action: nil)
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.cancelsTouchesInView = false
         pan.delaysTouchesBegan = false
         pan.delaysTouchesEnded = false
         pan.delegate = self
         addGestureRecognizer(pan)
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        // Consume small drags (scrub bar, sliders) but let large horizontal
+        // swipes pass through to the parent navigation DragGesture.
+        if gesture.state == .changed {
+            let translation = gesture.translation(in: self)
+            let horizontal = abs(translation.x)
+            let vertical = abs(translation.y)
+            if horizontal > 80 && horizontal > vertical * 2 {
+                gesture.state = .cancelled
+            }
+        }
     }
 }
 
@@ -90,6 +103,15 @@ extension GestureBlockerView: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Don't block SwiftUI's navigation DragGesture (which has minimumDistance=100).
+        // Only block short drags that interact with controls (scrub bar, volume slider).
+        if let pan = otherGestureRecognizer as? UIPanGestureRecognizer {
+            let translation = pan.translation(in: pan.view)
+            let horizontal = abs(translation.x)
+            if horizontal > 80 {
+                return false
+            }
+        }
         return true
     }
 }
