@@ -1654,6 +1654,16 @@ struct ZoomableMediaView: View {
         }
     }
 
+    /// Nothing has been loaded for this slide yet.
+    ///
+    /// Kept OUT of `body` deliberately. `body` here is already at the edge of
+    /// what the type checker will do in its time budget, and spelling this
+    /// conjunction inline twice pushed it over — "unable to type-check this
+    /// expression in reasonable time", which fails every CI job at once.
+    private var hasNothingToRender: Bool {
+        image == nil && videoURL == nil && animatedImageURL == nil
+    }
+
     /// Shown when every load attempt for this slide came back empty.
     @ViewBuilder
     private var unloadableSlide: some View {
@@ -1878,10 +1888,10 @@ struct ZoomableMediaView: View {
             ZStack {
                 Color(PlatformColor.adaptiveBackground)
 
-                if isLoading && image == nil && videoURL == nil && animatedImageURL == nil {
+                if isLoading && hasNothingToRender {
                     ProgressView()
                         .scaleEffect(1.5)
-                } else if loadFailed && image == nil && videoURL == nil && animatedImageURL == nil {
+                } else if loadFailed && hasNothingToRender {
                     // Say so rather than drawing an empty background. A slide
                     // that cannot load is a real outcome — silently showing the
                     // window colour made it look like the app had hung.
@@ -2010,8 +2020,7 @@ struct ZoomableMediaView: View {
             // budget. Navigating to an item is a deliberate "I want to see this
             // one", the same intent that used to be expressed by closing the
             // gallery and reopening on it.
-            if newValue && !oldValue && !hasLoadedMedia
-                && image == nil && videoURL == nil && animatedImageURL == nil {
+            if newValue && !oldValue && !hasLoadedMedia && hasNothingToRender {
                 loadAttempts = 0
                 Task { await loadMedia() }
             }
