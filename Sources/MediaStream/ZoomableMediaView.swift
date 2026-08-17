@@ -1883,34 +1883,47 @@ struct ZoomableMediaView: View {
         #endif
     }
 
+    /// The slide's contents: spinner, failure notice, or the media itself.
+    ///
+    /// Extracted from `body` for the type checker, not for tidiness. Adding the
+    /// failure branch turned this chain's `_ConditionalContent` from two cases
+    /// into three, and inlining that in `body` alongside the ZStack and the
+    /// modifiers below it blew the solver's budget — "unable to type-check this
+    /// expression in reasonable time", which fails every CI job. Isolating the
+    /// chain in its own builder gives `body` less to solve than it had before
+    /// the branch was added.
+    @ViewBuilder
+    private func slideContent(geometry: GeometryProxy) -> some View {
+        if isLoading && hasNothingToRender {
+            ProgressView()
+                .scaleEffect(1.5)
+        } else if loadFailed && hasNothingToRender {
+            // Say so rather than drawing an empty background. A slide that
+            // cannot load is a real outcome — silently showing the window
+            // colour made it look like the app had hung.
+            unloadableSlide
+        } else {
+            Group {
+                if mediaItem.type == .animatedImage {
+                    animatedImageContent(geometry: geometry)
+                } else if mediaItem.type == .image, let image = image {
+                    imageContent(image: image, geometry: geometry)
+                } else if mediaItem.type == .video, let vrProj = effectiveVRProjection, vrProj.requiresSphere {
+                    vrVideoContent
+                } else if mediaItem.type == .video {
+                    regularVideoContent
+                } else if mediaItem.type == .audio {
+                    audioPlayerView(geometry: geometry)
+                }
+            }
+        }
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 Color(PlatformColor.adaptiveBackground)
-
-                if isLoading && hasNothingToRender {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                } else if loadFailed && hasNothingToRender {
-                    // Say so rather than drawing an empty background. A slide
-                    // that cannot load is a real outcome — silently showing the
-                    // window colour made it look like the app had hung.
-                    unloadableSlide
-                } else {
-                    Group {
-                        if mediaItem.type == .animatedImage {
-                            animatedImageContent(geometry: geometry)
-                        } else if mediaItem.type == .image, let image = image {
-                            imageContent(image: image, geometry: geometry)
-                        } else if mediaItem.type == .video, let vrProj = effectiveVRProjection, vrProj.requiresSphere {
-                            vrVideoContent
-                        } else if mediaItem.type == .video {
-                            regularVideoContent
-                        } else if mediaItem.type == .audio {
-                            audioPlayerView(geometry: geometry)
-                        }
-                    }
-                }
+                slideContent(geometry: geometry)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
