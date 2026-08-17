@@ -1548,6 +1548,23 @@ struct ZoomableMediaView: View {
     @State private var lastPersistedPosition: Double = 0.0
     @State private var lastPersistTime: Date = .distantPast
     @State private var hasLoadedMedia: Bool = false
+    /// A load attempt finished having produced nothing to show.
+    ///
+    /// Every branch of `loadMedia()` can end this way — the image retries gave
+    /// up, `loadVideoURL()` came back nil, a local file had vanished, an
+    /// animated image resolved to neither URL, data, nor a static frame. The
+    /// body then draws only `adaptiveBackground` with no spinner (the `defer`
+    /// has already cleared `isLoading`), which is the reported "slide is a blank
+    /// grey screen even though its thumbnail loaded". Nothing re-ran the load,
+    /// because `.task(id: mediaItem.id)` does not fire again for an id it has
+    /// already run — so the slide stayed blank until the gallery was closed and
+    /// reopened, which is exactly what recreated the view. This flag is what
+    /// makes that state recoverable, and visible.
+    @State private var loadFailed: Bool = false
+    /// Bounds the automatic re-loads so a genuinely missing file can't spin.
+    @State private var loadAttempts: Int = 0
+    /// Deliberate navigation to a failed slide resets this budget.
+    private static let maxAutoLoadAttempts = 3
     @State private var useWebViewForVideo: Bool = false  // True for WebM, false for AVFoundation-compatible formats
     #if canImport(WebKit)
     @StateObject private var videoController = WebViewVideoController()
@@ -1634,6 +1651,32 @@ struct ZoomableMediaView: View {
                         .padding(.bottom, 80)
                 }
             }
+        }
+    }
+
+    /// Shown when every load attempt for this slide came back empty.
+    @ViewBuilder
+    private var unloadableSlide: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 40))
+                .foregroundColor(.secondary)
+            Text("Couldn't load this item")
+                .font(.callout)
+                .foregroundColor(.secondary)
+            #if !os(tvOS)
+            Button {
+                loadAttempts = 0
+                Task { await loadMedia() }
+            } label: {
+                Text("Try Again")
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.secondary.opacity(0.2), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            #endif
         }
     }
 
@@ -1838,6 +1881,11 @@ struct ZoomableMediaView: View {
                 if isLoading && image == nil && videoURL == nil && animatedImageURL == nil {
                     ProgressView()
                         .scaleEffect(1.5)
+                } else if loadFailed && image == nil && videoURL == nil && animatedImageURL == nil {
+                    // Say so rather than drawing an empty background. A slide
+                    // that cannot load is a real outcome — silently showing the
+                    // window colour made it look like the app had hung.
+                    unloadableSlide
                 } else {
                     Group {
                         if mediaItem.type == .animatedImage {
@@ -1908,7 +1956,21 @@ struct ZoomableMediaView: View {
             offset = .zero
             onZoomChanged(false)
 
+            loadFailed = false
+            loadAttempts = 0
+
             await loadMedia()
+        }
+        // A failed load retries itself, backing off, while the slide is on
+        // screen. This is what the user previously had to do by hand — leave the
+        // gallery and come back — and it costs nothing when loads succeed.
+        .onChange(of: loadFailed) { _, failed in
+            guard failed, isCurrentSlide, loadAttempts < Self.maxAutoLoadAttempts else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(loadAttempts) * 400_000_000)
+                guard !Task.isCancelled, loadFailed else { return }
+                await loadMedia()
+            }
         }
         .onChange(of: vrProjectionOverride) { _, newValue in
             guard mediaItem.type == .video else { return }
@@ -1944,6 +2006,15 @@ struct ZoomableMediaView: View {
             // or the VR view via effectiveVRProjection automatically.
         }
         .onChange(of: isCurrentSlide) { oldValue, newValue in
+            // Arriving at a slide whose load gave up: try again, with a fresh
+            // budget. Navigating to an item is a deliberate "I want to see this
+            // one", the same intent that used to be expressed by closing the
+            // gallery and reopening on it.
+            if newValue && !oldValue && !hasLoadedMedia
+                && image == nil && videoURL == nil && animatedImageURL == nil {
+                loadAttempts = 0
+                Task { await loadMedia() }
+            }
             if mediaItem.type == .video {
                 if newValue && !oldValue {
                     // When this slide becomes current (and wasn't before), show first frame for videos
@@ -2324,9 +2395,19 @@ struct ZoomableMediaView: View {
         // Only set loading flags after passing all guards
         isLoadingMedia = true
         isLoading = true
+        loadFailed = false
+        loadAttempts += 1
         defer {
             isLoading = false
             isLoadingMedia = false
+            // Did this attempt actually produce something to render? Checked in
+            // ONE place on the way out, so it covers every branch and every
+            // early `return` in the switch below — including the ones that were
+            // silently leaving a permanently blank slide.
+            loadFailed = !(hasLoadedMedia
+                || image != nil
+                || videoURL != nil
+                || animatedImageURL != nil)
         }
 
         switch mediaItem.type {
