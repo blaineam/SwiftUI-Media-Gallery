@@ -1919,7 +1919,21 @@ struct ZoomableMediaView: View {
         }
     }
 
-    var body: some View {
+    // `body` is split across three properties on purpose.
+    //
+    // Eighteen chained modifiers, each carrying a closure, type-check as ONE
+    // expression. That expression already sat near the solver's limit, and
+    // adding a single `.onChange` link tipped it over — "unable to type-check
+    // this expression in reasonable time", which fails every CI job.
+    //
+    // It compiles under Xcode 27 and fails under the 26.x toolchain CI runs, so
+    // a green local build proves nothing on its own. Check with
+    // DEVELOPER_DIR=/Applications/Xcode.app before pushing.
+    //
+    // Splitting gives the solver three smaller problems instead of one
+    // oversized one. Spread new modifiers across these rather than piling them
+    // onto whichever property you happened to open.
+    private var slideCore: some View {
         GeometryReader { geometry in
             ZStack {
                 Color(PlatformColor.adaptiveBackground)
@@ -2117,6 +2131,11 @@ struct ZoomableMediaView: View {
                 }
             }
         }
+    }
+
+    /// Slideshow and zoom hooks.
+    private var slideWithPlaybackHooks: some View {
+        slideCore
         .onChange(of: isSlideshowPlaying) { oldValue, newValue in
             // Handle slideshow start/stop for videos on the current slide
             if mediaItem.type == .video && isCurrentSlide {
@@ -2188,6 +2207,10 @@ struct ZoomableMediaView: View {
         // Cross-platform: listen for the gallery-level "pause everything that's
         // playing" broadcast (used when the user navigates between slides). This
         // is independent of the iOS lock-screen / background plumbing below.
+    }
+
+    var body: some View {
+        slideWithPlaybackHooks
         .onReceive(NotificationCenter.default.publisher(for: MediaPlaybackService.externalPauseNotification)) { _ in
             // Always pause whatever this slide is holding — idempotent and cheap.
             audioPlayer?.pause()
